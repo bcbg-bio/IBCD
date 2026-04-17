@@ -53,6 +53,7 @@ V1,   V2,   V3,   V4,   V5,   target
 IBCD produces three output files. See the output files example [here](https://github.com/bcbg-bio/IBCD/tree/main/data/output).
 
 - **G.csv**: Inferred causal graph given as the posterior-mean weighted adjacency matrix.  
+- **G_draws.npy**: Posterior samples of the weighted adjacency matrix $G$, saved as a NumPy array across MCMC draws.
 - **pip.csv**: Posterior inclusion probability for each edge, which measures how strongly the posterior supports the existence of an edge. 
 - **lfsr.csv**: Local false sign rate, the posterior probability that the inferred sign of an edge is incorrect.
 
