@@ -10,13 +10,13 @@ import cvxpy as cp
 from tqdm import tqdm
 
 
-def load_R_and_SE_hat(r_hat_file, se_hat_file, dag: bool = False):
+def load_R_and_SE_hat(r_hat_file, se_hat_file, causal_order: bool = False):
     """
     Load R_hat and SE_hat matrices, extract off-diagonal entries.
 
-    If dag=False:
+    If causal_order=False:
         use all off-diagonal entries (symmetric, undirected).
-    If dag=True:
+    If causal_order=True:
         use only upper-triangular off-diagonal entries (j < k).
 
     Returns:
@@ -27,7 +27,7 @@ def load_R_and_SE_hat(r_hat_file, se_hat_file, dag: bool = False):
     SE_hat = pd.read_csv(se_hat_file).values
     N = R_hat.shape[0]
 
-    if dag:
+    if causal_order:
         # upper triangle, excluding diagonal
         mask = np.triu(np.ones((N, N), dtype=bool), k=1)
     else:
@@ -244,17 +244,17 @@ def scale_free_degree(R):
     pi0 = 1 - P
     return pi0
 
-def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, dag=False, symmetric=False):
+def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, causal_order=False, symmetric=False):
     D = xi.shape[0]
     pi0_ij  = np.zeros((D, D))
     pi_k_ij = np.zeros((D, D))
 
     for i in range(D):
-        if dag:
-            # DAG: only j>i
+        if causal_order:
+            # Causal order: only j>i
             idx = np.arange(i+1, D)
         else:
-            # non-DAG: all off-diagonals in row i
+            # non-causal order: all off-diagonals in row i
             idx = np.r_[np.arange(0, i), np.arange(i+1, D)]
         n = len(idx)
         if n == 0:
@@ -275,7 +275,7 @@ def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, dag=Fals
         pi0_ij[i, idx] = p0.value
         pi_k_ij[i, idx] = pk.value
 
-        if not dag and symmetric:
+        if not causal_order and symmetric:
             # optional: mirror to make undirected
             pi0_ij[idx, i] = p0.value
             pi_k_ij[idx, i] = pk.value
@@ -284,7 +284,7 @@ def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, dag=Fals
     np.fill_diagonal(pi0_ij, 1.0)
     np.fill_diagonal(pi_k_ij, 0.0)
 
-    if dag:
+    if causal_order:
         # only when enforcing DAG
         tril_i, tril_j = np.tril_indices(D)
         pi0_ij[tril_i, tril_j] = 1.0

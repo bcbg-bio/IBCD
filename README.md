@@ -20,7 +20,7 @@ To run IBCD use the following command
 ```
 python ibcd.py --data /PATH/TO/data.csv \
                --prior sf \
-               --dag true \
+               --causal_order false \
                --output_dir OUTPUT_FOLDER
 ```
 
@@ -59,7 +59,7 @@ IBCD produces three output files. See the output files example [here](https://gi
 
 ### Arguments ###
 ```
-usage: ibcd.py [-h] --data DATA --prior {sf,er} --dag {true,false} --output_dir OUTPUT_DIR
+usage: ibcd.py [-h] --data DATA --prior {sf,er} --causal_order {true,false} --output_dir OUTPUT_DIR
                [--alpha_sf ALPHA_SF] [--alpha_er ALPHA_ER] [--num_warmup NUM_WARMUP]
                [--num_samples NUM_SAMPLES] [--num_chains NUM_CHAINS] [--epsilon EPSILON]
 
@@ -71,7 +71,7 @@ options:
   -h, --help            show this help message and exit
   --data DATA           Path to input data CSV.
   --prior {sf,er}       Choice of empirical prior: 'sf' = scale-free, 'er' = Erdős–Rényi.
-  --dag {true,false}    'true' = allow Directed Acyclic Graph, 'false' = allow Cyclic Graph.
+  --causal_order {true,false}    'false' = input variables are unordered, as in most real data (e.g. perturb-seq); 'true' = input variables are already in causal/topological order.
   --output_dir OUTPUT_DIR
                         Directory to save all outputs.
   --alpha_sf ALPHA_SF   Penalty parameter for SF prior (scale-free row-wise optimization). Default=1.0.

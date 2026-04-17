@@ -45,7 +45,8 @@ def main(args):
 
     D = xi.shape[0]
 
-    dag_flag = (args.dag.lower() == "true")
+    #dag_flag = (args.dag.lower() == "true")
+    causal_order_flag = (args.causal_order.lower() == "true")
 
     if args.prior.lower() == "sf":
         # -------- Scale-free (SF) prior --------
@@ -60,7 +61,7 @@ def main(args):
         pi0_ij, pi_k_ij = solve_edge_weights_rowwise(
             xi,
             pi0_i,
-            dag=dag_flag,
+            causal_order=causal_order_flag,
             alpha_sf=args.alpha_sf,
             solver=cp.ECOS,
         )
@@ -69,7 +70,7 @@ def main(args):
         # -------- Erdős–Rényi (ER) prior --------
         print("2) Using ER prior (Erdős–Rényi)...")
         # Load off-diagonal or upper-tri entries depending on DAG
-        w, se_hat = load_R_and_SE_hat(Rhat_path, SE_hat_path, dag=dag_flag)
+        w, se_hat = load_R_and_SE_hat(Rhat_path, SE_hat_path, causal_order=causal_order_flag)
         #print(f"Shape of w: {w.shape}, Shape of se: {se_hat.shape}")
         pi0, pi_slabs, slab_scales = empirical_bayes_em(
             w,
@@ -166,10 +167,10 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--dag",
-        required=True,
+        "--causal_order",
+        default="false",
         choices=["true", "false"],
-        help="'true' = allow Directed Acyclic Graph, 'false' = allow Cyclic Graph.",
+        help="'false' = input variables are unordered, as in most real data (e.g. perturb-seq); 'true' = input variables are already in causal/topological order.",
     )
 
     parser.add_argument(
