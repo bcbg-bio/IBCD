@@ -1,4 +1,5 @@
-# import conditional_independence
+import conditional_independence
+from causaldag import igsp
 import numpy as np
 import pandas as pd
 import scipy.linalg as slin
@@ -107,4 +108,52 @@ def notears_linear(X, lambda1, loss_type='l2', max_iter=100, h_tol=1e-8, rho_max
     W_est[np.abs(W_est) < w_threshold] = 0
     return W_est
 
+
+def make_dotears_data2(X, targets):
+  data_dotears = {}
+  for key in np.unique(targets):
+    if key != "control":
+      data_dotears[int(key.replace("V", ""))-1] = X[targets==key,]
+    else:
+      data_dotears["obs"] = X[targets==key,]
+  return data_dotears
+
+
+def make_dotears_data(X, targets, colnames):
+    data_dotears = {}
+    colnames = np.array(colnames)
+
+    for key in np.unique(targets):
+        if key == "control":
+            data_dotears["obs"] = X[targets == key, :]
+        else:
+            col_idx = np.where(colnames == key)[0][0]
+            data_dotears[col_idx] = X[targets == key, :]
+
+    return data_dotears
+
+def run_igsp(X_dotears, alpha=0.001, alpha_inv=0.001):
+    obs_data = X_dotears['obs']
+    p = obs_data.shape[1]
+    nodes = list(range(p))
+
+    # iv_samples_list is a list of n x p ndarrays
+    inv_samples_from_data = [v for k, v in X_dotears.items() if k != 'obs']
+
+    # setting_list is list of dicts
+    # each dict is key 'intervention' to a list of nodes
+    settings_from_data = [dict(interventions=[k]) for k, v in X_dotears.items() if k != 'obs']
+
+    obs_suffstat = conditional_independence.partial_correlation_suffstat(obs_data)
+    invariance_suffstat = conditional_independence.gauss_invariance_suffstat(
+        obs_data, inv_samples_from_data)
+
+    ci_tester = conditional_independence.MemoizedCI_Tester(
+        conditional_independence.partial_correlation_test, obs_suffstat, alpha=alpha)
+    invariance_tester = conditional_independence.MemoizedInvarianceTester(
+        conditional_independence.gauss_invariance_test, invariance_suffstat, alpha=alpha_inv)
+
+    est_dag = igsp(settings_from_data, nodes, ci_tester, invariance_tester)
+    W_igsp = est_dag.to_amat()[0]
+    return(W_igsp)
 

@@ -8,7 +8,7 @@ library(matrixStats)
 library(scales)
 library(caret)
 
-raw_h5ad <- "K562_gwps_raw_singlecell_01.h5ad"
+raw_h5ad <- "K562_essential_raw_singlecell_01.h5ad"
 gene_csv <- "test.csv"
 out_dir  <- "output"
 
@@ -300,8 +300,8 @@ h$close_all()
 obs_keep <- obs[keep_cell_ix, ]
 targets_clean <- ifelse(obs_keep$gene_id == "non-targeting", "control", obs_keep$gene_id)
 
-saveRDS(X, file.path(out_dir, "X_521_ccc_norm_cellsxgenes_gwps_eff.rds"))
-writeLines(targets_clean, file.path(out_dir, "targets_clean_gwps_eff.txt"))
+saveRDS(X, file.path(out_dir, "X_521_ccc_norm_cellsxgenes_essential.rds")) 
+writeLines(targets_clean, file.path(out_dir, "targets_clean_essential.txt"))
 
 ts("Done. dim(X) = ", paste(dim(X), collapse = "×"),
    " | length(targets_clean) = ", length(targets_clean))
@@ -312,95 +312,48 @@ dim(X)        # cells × ~521
 length(targets_clean)
 stopifnot(nrow(X) == length(targets_clean))
 
-X_control <- X[targets_clean == "control", , drop = FALSE]
-Sigma <- t(X_control) %*% X_control / nrow(X_control)
-xi <- Sigma^2
-diag(xi) <- 0
-
-xi_norm <- xi / sqrt(sum(xi^2))
-write.csv(xi_norm, file = file.path(out_dir, "xi_gwps.csv"), row.names = FALSE)
-
-D <- ncol(X) 
-#genes   <- paste0("V", 1L:D) 
-U_diag  <- numeric(D)
-V_sum   <- matrix(0, D, D)         
-R_hat   <- matrix(0, D, D)
-SE_hat <- matrix(0, D, D)
-
-for (i in seq_len(D)) {
-  target <- colnames(X)[i]
-  message("Running IV for target: ", target)
-  res <- multiple_iv_reg_UV(target, X, targets_clean)  # <<<< HERE: use X and targets_clean
-  U_diag[i] <- res$U_i
-  V_sum     <- V_sum + res$V_hat
-  R_hat[i, ] <- unlist(res$beta_se[1, grep("_beta_hat$", names(res$beta_se))])
-  SE_hat[i, ] <- unlist(res$beta_se[1, grep("_se_hat$", names(res$beta_se))])
-}
-
-U <- diag(U_diag)
-V <- V_sum / D
-
-write.csv(SE_hat, file = file.path(out_dir, "SE_hat_gwps.csv"), row.names = FALSE)
-write.csv(R_hat, file = file.path(out_dir, "R_true_gwps.csv"), row.names = FALSE)
-write.csv(U,      file = file.path(out_dir,     "U_true_gwps.csv"),     row.names = FALSE)
-write.csv(V,      file = file.path(out_dir,     "V_true_gwps.csv"),     row.names = FALSE)
-
-
 ################################
 ################################
 
-X_fn    <- file.path(out_dir, "X_521_ccc_norm_cellsxgenes_gwps_eff.rds")
-y_fn    <- file.path(out_dir, "targets_clean_gwps_eff.txt")
+X_fn <- file.path(out_dir, "X_521_ccc_norm_cellsxgenes_essential.rds")
+y_fn <- file.path(out_dir, "targets_clean_essential.txt")
 
 # ---- load ----
-X <- readRDS(X_fn)                    # cells × 521, already ccc+gem normalized
-targets_clean <- readLines(y_fn)      # length == nrow(X)
+X <- readRDS(X_fn)                    # cells × genes
+targets_clean <- readLines(y_fn)      # same length as nrow(X)
+
+stopifnot(nrow(X) == length(targets_clean))
 
 # ---- split indices ----
 idx_ctrl <- which(targets_clean == "control")
 idx_pert <- which(targets_clean != "control")
 
+# CV performance stability
 set.seed(123)
-folds_pert <- caret::createFolds(factor(targets_clean[idx_pert]), k = 5, returnTrain = FALSE)
-folds_ctrl <- caret::createFolds(seq_along(idx_ctrl),                 k = 5, returnTrain = FALSE)
 
-# ---- helper: IV regression ----
-run_iv <- function(X_mat, y_vec) {
-  D <- ncol(X_mat)
-  U_diag <- numeric(D)
-  V_sum  <- matrix(0, D, D)
-  R_hat  <- matrix(0, D, D, dimnames = list(colnames(X_mat), colnames(X_mat)))
-  SE_hat <- matrix(0, D, D, dimnames = list(colnames(X_mat), colnames(X_mat)))
-  for (i in seq_len(D)) {
-    tgt <- colnames(X_mat)[i]
-    message("IV on target: ", tgt)
-    res <- multiple_iv_reg_UV(tgt, X_mat, y_vec)
-    U_diag[i] <- res$U_i
-    V_sum     <- V_sum + res$V_hat
-    R_hat[i, ] <- unlist(res$beta_se[1, grep("_beta_hat$", names(res$beta_se))])
-    SE_hat[i, ] <- unlist(res$beta_se[1, grep("_se_hat$",  names(res$beta_se))])
-  }
-  list(R_hat = R_hat,
-       SE_hat = SE_hat,
-       U = diag(U_diag),
-       V = V_sum / D)
-}
+# CV hyperparmeter tune
+#set.seed(456)
 
-# ---- helper: compute xi from controls (use your exact style) ----
-compute_xi <- function(Xc) {
-  Sigma <- t(Xc) %*% Xc / nrow(Xc)
-  xi <- Sigma^2
-  diag(xi) <- 0
-  xi_norm <- xi / sqrt(sum(xi^2))
-  xi_norm
-}
+folds_pert <- caret::createFolds(
+  factor(targets_clean[idx_pert]),
+  k = 5,
+  returnTrain = FALSE
+)
 
-# ---- CV loop ----
-cv_out <- vector("list", 5)
+folds_ctrl <- caret::createFolds(
+  seq_along(idx_ctrl),
+  k = 5,
+  returnTrain = FALSE
+)
+
+fold_dir <- "cv_data"
+dir.create(fold_dir, showWarnings = FALSE, recursive = TRUE)
+
 for (i in seq_len(5)) {
-  te_idx_pert <- idx_pert[ folds_pert[[i]] ]
-  te_idx_ctrl <- idx_ctrl[ folds_ctrl[[i]] ]
-  te_idx <- c(te_idx_pert, te_idx_ctrl)
+  
+  te_idx_pert <- idx_pert[folds_pert[[i]]]
+  te_idx_ctrl <- idx_ctrl[folds_ctrl[[i]]]
+  te_idx <- sort(c(te_idx_pert, te_idx_ctrl))
   
   tr_idx <- setdiff(seq_len(nrow(X)), te_idx)
   
@@ -410,22 +363,59 @@ for (i in seq_len(5)) {
   X_te <- X[te_idx, , drop = FALSE]
   y_te <- targets_clean[te_idx]
   
-  message(sprintf("Fold %d — train: %d (pert=%d, ctrl=%d) | test: %d (pert=%d, ctrl=%d)",
-                  i,
-                  length(tr_idx), sum(y_tr!="control"), sum(y_tr=="control"),
-                  length(te_idx), sum(y_te!="control"), sum(y_te=="control")))
+  stopifnot(nrow(X_tr) == length(y_tr))
+  stopifnot(nrow(X_te) == length(y_te))
+  stopifnot(length(intersect(tr_idx, te_idx)) == 0)
+  stopifnot(nrow(X_tr) + nrow(X_te) == nrow(X))
   
-  res_tr <- run_iv(X_tr, y_tr)
+  y_tr_out <- file.path(fold_dir, sprintf("Y_matrix_essential_train_fold%d.csv", i))
+  t_tr_out <- file.path(fold_dir, sprintf("targets_essential_train_fold%d.txt", i))
   
-  Xc_tr <- X_tr[y_tr == "control", , drop = FALSE]
-  xi_fold <- compute_xi(Xc_tr)
+  y_te_out <- file.path(fold_dir, sprintf("Y_matrix_essential_test_fold%d.csv", i))
+  t_te_out <- file.path(fold_dir, sprintf("targets_essential_test_fold%d.txt", i))
   
-  write.csv(res_tr$R_hat, file.path(out_dir, sprintf("R_true_gwps_fold%d.csv", i)), row.names = FALSE)
-  write.csv(res_tr$SE_hat, file.path(out_dir, sprintf("SE_hat_gwps_fold%d.csv", i)), row.names = FALSE)
-  write.csv(res_tr$U,      file.path(out_dir, sprintf("U_true_gwps_fold%d.csv", i)),      row.names = FALSE)
-  write.csv(res_tr$V,      file.path(out_dir, sprintf("V_true_gwps_fold%d.csv", i)),      row.names = FALSE)
-  write.csv(xi_fold,       file.path(out_dir, sprintf("xi_gwps_fold%d.csv", i)),     row.names = FALSE)
+  write.csv(X_tr, y_tr_out, row.names = FALSE)
+  writeLines(y_tr, t_tr_out)
   
-  cv_out[[i]] <- list(train=res_tr, X_te=X_te, y_te=y_te, xi=xi_fold)
+  write.csv(X_te, y_te_out, row.names = FALSE)
+  writeLines(y_te, t_te_out)
+  
+  cat(sprintf(
+    paste0(
+      "   TRAIN: %d samples (ctrl=%d, pert=%d)\n",
+      "   TEST : %d samples (ctrl=%d, pert=%d)\n"
+    ),
+    i,
+    length(y_tr), sum(y_tr == "control"), sum(y_tr != "control"),
+    length(y_te), sum(y_te == "control"), sum(y_te != "control")
+  ))
 }
+
+out_dir  <- file.path(fold_dir, "input")
+
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+for (i in seq_len(5)) {
+  
+  for (split in c("train", "test")) {
+    
+    y_csv <- file.path(fold_dir, sprintf("Y_matrix_essential_%s_fold%d.csv", split, i))
+    t_txt <- file.path(fold_dir, sprintf("targets_essential_%s_fold%d.txt", split, i))
+
+    out_csv <- file.path(out_dir, sprintf("Y_matrix_essential_%s_fold%d.csv", split, i))
+    
+    Y <- read.csv(y_csv, check.names = FALSE)
+    targets <- readLines(t_txt)
+    
+    stopifnot(nrow(Y) == length(targets))
+    Y$target <- targets
+    
+    write.csv(Y, out_csv, row.names = FALSE)
+    
+    cat(sprintf(
+      "Created: %s from %s + %s\n",
+      basename(out_csv), basename(y_csv), basename(t_txt)
+    ))
+  }
+}
+
 
