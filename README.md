@@ -50,7 +50,7 @@ V1,   V2,   V3,   V4,   V5,   target
 
 ### Output files ###
 
-IBCD produces three output files. See the output files example [here](https://github.com/bcbg-bio/IBCD/tree/main/data/output).
+IBCD produces four output files. See the output files example [here](https://github.com/bcbg-bio/IBCD/tree/main/data/output).
 
 - **G.csv**: Inferred causal graph given as the posterior-mean weighted adjacency matrix.  
 - **G_draws.npy**: Posterior samples of the weighted adjacency matrix $G$, saved as a NumPy array across MCMC draws.
