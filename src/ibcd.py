@@ -4,7 +4,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-import cvxpy as cp
 from numpyro import infer
 from numpyro.infer import MCMC, NUTS
 
@@ -59,7 +58,6 @@ def main(args):
             xi,
             pi0_i,
             alpha_sf=args.alpha_sf,
-            solver=cp.ECOS,
         )
 
     elif args.prior.lower() == "er":

@@ -28,6 +28,7 @@ SRC = REPO / "src"
 sys.path.insert(0, str(SRC))
 
 from empirical_prior import (  # noqa: E402
+    _project_to_budget,
     load_R_and_SE_hat,
     scale_free_degree,
     solve_edge_weights_rowwise,
@@ -198,6 +199,76 @@ def test_er_prior_is_symmetric():
     xi, _ = _fixture(D)
     pi0_ij, _, _ = solve_spike_slab_diagonal_spike(xi, pi0=0.8)
     assert np.allclose(pi0_ij, pi0_ij.T, atol=1e-5)
+
+
+# --------------------------------------------------------------------------
+# Closed-form projection vs the quadratic program it replaced
+# --------------------------------------------------------------------------
+
+def test_project_to_budget_matches_known_solutions():
+    # box slack: the offset is zero when x already sums to the budget
+    x = np.array([0.1, 0.2, 0.3])
+    assert np.allclose(_project_to_budget(x, x.sum()), x)
+    # box binds above: [0, 0, 5] onto sum == 2 gives [0.5, 0.5, 1]
+    assert np.allclose(_project_to_budget(np.array([0.0, 0.0, 5.0]), 2.0),
+                       [0.5, 0.5, 1.0])
+    # degenerate budgets
+    assert np.allclose(_project_to_budget(np.array([0.3, 0.7]), 0.0), [0.0, 0.0])
+    assert np.allclose(_project_to_budget(np.array([0.3, 0.7]), 2.0), [1.0, 1.0])
+
+
+def test_rowwise_solver_matches_the_cvxpy_program():
+    import cvxpy as cp
+    D = 12
+    xi, _ = _fixture(D, seed=5)
+    pi0_i = np.full(D, 0.8)
+    _, pi_k_ij = solve_edge_weights_rowwise(xi, pi0_i)
+
+    for i in range(D):
+        idx = np.arange(D) != i
+        n = D - 1
+        row = xi[i, idx]
+        xnorm = row * ((1.0 - pi0_i[i]) * n / row.sum())
+        p0 = cp.Variable(n, nonneg=True)
+        pk = cp.Variable(n, nonneg=True)
+        cons = [p0 + pk == 1, cp.sum(p0) == pi0_i[i] * n]
+        obj = cp.sum_squares(pk - xnorm) + cp.sum_squares(p0 - (1 - xnorm))
+        cp.Problem(cp.Minimize(obj), cons).solve(solver=cp.ECOS)
+        # ECOS is iterative and solves only to its own tolerance, so compare
+        # loosely on the iterates and strictly on the objective.
+        assert np.allclose(pi_k_ij[i, idx], pk.value, atol=1e-4), f"row {i}"
+        f = lambda v: np.sum((v - xnorm) ** 2) + np.sum(((1 - v) - (1 - xnorm)) ** 2)
+        assert f(pi_k_ij[i, idx]) <= f(pk.value) + 1e-12, (
+            f"row {i}: projection is worse than the QP solution"
+        )
+
+
+def test_global_solver_matches_the_cvxpy_program():
+    import cvxpy as cp
+    D = 12
+    xi, _ = _fixture(D, seed=5)
+    pi0 = 0.8
+    pi0_ij, pi_k_ij, _ = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
+
+    offdiag = np.ones((D, D), dtype=bool)
+    np.fill_diagonal(offdiag, False)
+    xi_norm = xi * ((1.0 - pi0) * (D ** 2 - D) / xi[offdiag].sum())
+
+    pi0_var = cp.Variable((D, D), nonneg=True)
+    pik_var = cp.Variable((D, D), nonneg=True)
+    cons = [pi0_var[offdiag] + pik_var[offdiag] == 1.0,
+            cp.diag(pi0_var) == 1.0, cp.diag(pik_var) == 0.0,
+            cp.sum(pi0_var) - cp.sum(cp.diag(pi0_var)) == pi0 * (D ** 2 - D)]
+    obj = (cp.sum_squares(cp.multiply(offdiag, pik_var - xi_norm))
+           + cp.sum_squares(cp.multiply(offdiag, pi0_var - (1 - xi_norm))))
+    cp.Problem(cp.Minimize(obj), cons).solve()
+
+    assert np.allclose(pi_k_ij[offdiag], pik_var.value[offdiag], atol=1e-4)
+    assert np.allclose(pi0_ij[offdiag], pi0_var.value[offdiag], atol=1e-4)
+    f = lambda v: 2.0 * np.sum((v - xi_norm[offdiag]) ** 2)
+    assert f(pi_k_ij[offdiag]) <= f(pik_var.value[offdiag]) + 1e-12, (
+        "projection is worse than the QP solution"
+    )
 
 
 # --------------------------------------------------------------------------

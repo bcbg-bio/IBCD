@@ -30,6 +30,41 @@ def load_R_and_SE_hat(r_hat_file, se_hat_file):
     return w, se
 
 
+def _project_to_budget(x, budget, max_iter=200, tol=1e-14):
+    """Euclidean projection of x onto {y : sum(y) == budget, 0 <= y <= 1}.
+
+    Both prior paths minimise a squared distance to xi subject to the box and
+    a single constraint fixing the total slab mass. That is exactly this
+    projection, whose solution is clip(x + c, 0, 1) for the unique offset c
+    matching the budget. c is found by bisection; the bracket below is chosen
+    so the clipped sum runs from 0 to len(x) across it.
+
+    Args:
+        x (np.ndarray): Point to project.
+        budget (float): Required sum of the result.
+
+    Returns:
+        np.ndarray: The projection of x.
+    """
+    x = np.asarray(x, dtype=float)
+    n = x.size
+    if n == 0:
+        return x.copy()
+
+    budget = float(np.clip(budget, 0.0, n))
+    lo = -float(x.max())       # sum(clip(x + lo, 0, 1)) == 0
+    hi = 1.0 - float(x.min())  # sum(clip(x + hi, 0, 1)) == n
+    for _ in range(max_iter):
+        c = 0.5 * (lo + hi)
+        if np.clip(x + c, 0.0, 1.0).sum() < budget:
+            lo = c
+        else:
+            hi = c
+        if hi - lo < tol:
+            break
+    return np.clip(x + 0.5 * (lo + hi), 0.0, 1.0)
+
+
 def empirical_bayes_em(w, se_hat, K=50, sigma0=0.001, sigma_min=0.01, sigma_max=1.0, alpha_er=2, tol=1e-6, safety_limit=5_000_000):
     """
     Run the EM algorithm for Empirical Bayes estimation of spike-and-slab mixture.
@@ -121,23 +156,13 @@ def solve_spike_slab_diagonal_spike(
 
     D = xi.shape[0]
 
-    pi0_var = cp.Variable((D,D), nonneg=True)
-    pik_var = cp.Variable((D,D), nonneg=True)
-
-
-    constraints = []
-
     offdiag_mask = np.ones((D, D), dtype=bool)
     np.fill_diagonal(offdiag_mask, False)
 
-    constraints.append(pi0_var[offdiag_mask] + pik_var[offdiag_mask] == 1.0)
-    constraints.append(cp.diag(pi0_var) == 1.0)
-    constraints.append(cp.diag(pik_var) == 0.0)
-
     # Scale xi so that its total over the off-diagonal equals the slab budget
-    # implied by the sparsity constraint below, S = (1 - pi0) * (D^2 - D). The
-    # data term then agrees with the constraint, so the solution is xi_norm
-    # itself wherever the [0, 1] box does not bind.
+    # implied by the sparsity constraint, S = (1 - pi0) * (D^2 - D). The data
+    # term then agrees with the constraint, so the projection below returns
+    # xi_norm itself wherever the [0, 1] box does not bind.
     slab_budget = float(1.0 - pi0) * (D**2 - D)
     xi_offdiag_sum = float(xi[offdiag_mask].sum())
     if xi_offdiag_sum > 1e-12:
@@ -145,33 +170,16 @@ def solve_spike_slab_diagonal_spike(
     else:
         xi_norm = np.full((D, D), slab_budget / (D**2 - D))
 
+    # pi0_ij + pi_k_ij == 1 off the diagonal, and the diagonal is all spike,
+    # so only the off-diagonal slab weights are free.
+    pik_sol = np.zeros((D, D))
+    pi0_sol = np.ones((D, D))
+    pik_sol[offdiag_mask] = _project_to_budget(xi_norm[offdiag_mask], slab_budget)
+    pi0_sol[offdiag_mask] = 1.0 - pik_sol[offdiag_mask]
 
-    data_resid = cp.sum_squares(
-        cp.multiply(offdiag_mask, pik_var - xi_norm)
-    ) + cp.sum_squares(
-        cp.multiply(offdiag_mask, pi0_var - (1 - xi_norm))
-    )
-
-    # C) Global prior penalty: 
-    #    We only want the sum over off-diagonal pi0_ij to be ~ pi0 * (D^2 - D).
-    sum_pi0_offdiag = cp.sum(pi0_var) - cp.sum(cp.diag(pi0_var))
-    #   i.e. pi0*(D^2 - D) is the target
-    #global_penalty = cp.square(
-    #    sum_pi0_offdiag - pi0*(D**2 - D)
-    #)
-    constraints.append(
-        sum_pi0_offdiag == pi0*(D**2 - D)
-    )
-    # Weighted objective
-    objective = alpha_data*data_resid # + beta_global*global_penalty
-
-    # Solve
-    prob = cp.Problem(cp.Minimize(objective), constraints)
-    val = prob.solve()
-
-    # Extract numeric solutions
-    pi0_sol = pi0_var.value
-    pik_sol = pik_var.value
+    # Objective value: with pi0 = 1 - pi_k the two residual terms are equal.
+    resid = pik_sol[offdiag_mask] - xi_norm[offdiag_mask]
+    val = float(alpha_data * 2.0 * np.sum(resid ** 2))
 
     return pi0_sol, pik_sol, val
 
@@ -243,7 +251,13 @@ def scale_free_degree(R):
     pi0 = 1 - P
     return pi0
 
-def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, symmetric=False):
+def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, symmetric=False):
+    """Edge-specific spike and slab weights, solved one row at a time.
+
+    alpha_sf is retained for interface compatibility but has no effect:
+    scaling a quadratic objective does not move its minimiser under hard
+    constraints.
+    """
     D = xi.shape[0]
     pi0_ij  = np.zeros((D, D))
     pi_k_ij = np.zeros((D, D))
@@ -256,7 +270,7 @@ def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, symmetri
             continue
 
         # Scale this row of xi so its total equals the row's slab budget,
-        # d_i = (1 - pi0_i) * n, which is what the constraint below enforces.
+        # d_i = (1 - pi0_i) * n, which is what the sparsity constraint fixes.
         row = xi[i, idx]
         row_budget = float(1.0 - pi0_i[i]) * n
         row_sum = float(row.sum())
@@ -265,21 +279,16 @@ def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, symmetri
         else:
             xnorm = np.full(n, row_budget / n)
 
-        p0 = cp.Variable(n, nonneg=True)
-        pk = cp.Variable(n, nonneg=True)
-        cons = [p0 + pk == 1, cp.sum(p0) == pi0_i[i] * n]
-        obj = cp.sum_squares(pk - xnorm) + cp.sum_squares(p0 - (1 - xnorm))
+        pk = _project_to_budget(xnorm, row_budget)
+        p0 = 1.0 - pk
 
-        prob = cp.Problem(cp.Minimize(alpha_sf * obj), cons)
-        prob.solve(solver=solver, verbose=False)
-
-        pi0_ij[i, idx] = p0.value
-        pi_k_ij[i, idx] = pk.value
+        pi0_ij[i, idx] = p0
+        pi_k_ij[i, idx] = pk
 
         if symmetric:
             # optional: mirror to make undirected
-            pi0_ij[idx, i] = p0.value
-            pi_k_ij[idx, i] = pk.value
+            pi0_ij[idx, i] = p0
+            pi_k_ij[idx, i] = pk
 
     # diagonal always spike
     np.fill_diagonal(pi0_ij, 1.0)
