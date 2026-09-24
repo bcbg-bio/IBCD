@@ -56,6 +56,26 @@ IBCD produces four output files. See the output files example [here](https://git
 - **pip.csv**: Posterior inclusion probability for each edge, which measures how strongly the posterior supports the existence of an edge. 
 - **lfsr.csv**: Local false sign rate, the posterior probability that the inferred sign of an edge is incorrect.
 
+`G_draws.npy` is produced by every run but is not included in the example
+directory, as it scales with the number of draws (`num_chains` × `num_samples`
+× `p` × `p` float32 values) and is too large to keep in the repository.
+
+The example outputs in `data/output` were generated from `data/input/data.csv`
+(p = 50) with:
+
+```
+python src/ibcd.py --data data/input/data.csv \
+                   --prior sf \
+                   --output_dir data/output \
+                   --num_warmup 300 \
+                   --num_samples 200 \
+                   --num_chains 3
+```
+
+`num_samples` is reduced from the default of 1000 to keep the example
+inexpensive to reproduce on a CPU; the run above takes roughly 15 minutes on a
+16-core laptop. Use the defaults for real analyses.
+
 
 ### Arguments ###
 ```

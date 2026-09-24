@@ -91,7 +91,7 @@ def main(args):
         matrix_model_spike_horseshoe,
         target_accept_prob=0.7,
         max_tree_depth=10,
-        init_strategy=infer.init_to_median(num_samples=3),
+        init_strategy=infer.init_to_median(num_samples=50),
     )
 
     mcmc = MCMC(
