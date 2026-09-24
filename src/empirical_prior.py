@@ -30,7 +30,7 @@ def load_R_and_SE_hat(r_hat_file, se_hat_file):
     return w, se
 
 
-def empirical_bayes_em(w, se_hat, K=50, sigma_min=0.01, sigma_max=1.0, alpha_er=2, tol=1e-6, safety_limit=5_000_000):
+def empirical_bayes_em(w, se_hat, K=50, sigma0=0.001, sigma_min=0.01, sigma_max=1.0, alpha_er=2, tol=1e-6, safety_limit=5_000_000):
     """
     Run the EM algorithm for Empirical Bayes estimation of spike-and-slab mixture.
 
@@ -38,25 +38,28 @@ def empirical_bayes_em(w, se_hat, K=50, sigma_min=0.01, sigma_max=1.0, alpha_er=
         w (jnp.ndarray): Off-diagonal entries of R_hat (observations).
         se_hat (jnp.ndarray): Standard error estimates for each entry.
         K (int): Number of slab components.
+        sigma0 (float): Standard deviation of the spike component.
         sigma_min (float): Minimum variance for slab components.
         sigma_max (float): Maximum variance for slab components.
-        alpha (float): Penalty hyperparameter (default: 2).
+            sigma_k holds the corresponding standard deviations.
+        alpha_er (float): Penalty hyperparameter (default: 2).
         tol (float): Convergence threshold for stopping criteria.
+        safety_limit (int): Maximum number of EM iterations before stopping.
 
     Returns:
         pi_0 (float): Estimated proportion of the spike component.
         pi_k (jnp.ndarray): Estimated proportions of the slab components.
     """
     N = len(w)
-    sigma_k = jnp.linspace(jnp.sqrt(sigma_min), sigma_max, K)**2
+    sigma_k = jnp.linspace(jnp.sqrt(sigma_min), jnp.sqrt(sigma_max), K)
     pi_0 = jnp.array(0.5)
     pi_k = jnp.full(K, (1 - pi_0) / K)
 
     @jax.jit
     def em_step(params):
         pi_0, pi_k = params
-        f_0 = norm.pdf(w, loc=0, scale=jnp.sqrt(0.001) + se_hat)
-        f_k = norm.pdf(w[:, None], loc=0, scale=jnp.sqrt(sigma_k)[None, :] + se_hat[:, None])
+        f_0 = norm.pdf(w, loc=0, scale=jnp.sqrt(sigma0**2 + se_hat**2))
+        f_k = norm.pdf(w[:, None], loc=0, scale=jnp.sqrt(sigma_k[None, :]**2 + se_hat[:, None]**2))
         numerator_0 = pi_0 * f_0
         numerator_k = pi_k * f_k
         denominator = numerator_0 + numerator_k.sum(axis=1)
@@ -131,10 +134,16 @@ def solve_spike_slab_diagonal_spike(
     constraints.append(cp.diag(pi0_var) == 1.0)
     constraints.append(cp.diag(pik_var) == 0.0)
 
-    max_xi = xi.max()
-    if max_xi < 1e-12:
-        max_xi = 1e-12
-    xi_norm = xi / max_xi
+    # Scale xi so that its total over the off-diagonal equals the slab budget
+    # implied by the sparsity constraint below, S = (1 - pi0) * (D^2 - D). The
+    # data term then agrees with the constraint, so the solution is xi_norm
+    # itself wherever the [0, 1] box does not bind.
+    slab_budget = float(1.0 - pi0) * (D**2 - D)
+    xi_offdiag_sum = float(xi[offdiag_mask].sum())
+    if xi_offdiag_sum > 1e-12:
+        xi_norm = xi * (slab_budget / xi_offdiag_sum)
+    else:
+        xi_norm = np.full((D, D), slab_budget / (D**2 - D))
 
 
     data_resid = cp.sum_squares(
@@ -246,9 +255,15 @@ def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, symmetri
         if n == 0:
             continue
 
+        # Scale this row of xi so its total equals the row's slab budget,
+        # d_i = (1 - pi0_i) * n, which is what the constraint below enforces.
         row = xi[i, idx]
-        m = row.max() if row.max() > 0 else 1.0
-        xnorm = row / m
+        row_budget = float(1.0 - pi0_i[i]) * n
+        row_sum = float(row.sum())
+        if row_sum > 1e-12:
+            xnorm = row * (row_budget / row_sum)
+        else:
+            xnorm = np.full(n, row_budget / n)
 
         p0 = cp.Variable(n, nonneg=True)
         pk = cp.Variable(n, nonneg=True)

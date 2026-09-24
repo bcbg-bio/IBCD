@@ -95,6 +95,46 @@ def test_solve_edge_weights_rowwise_satisfies_its_constraints():
         )
 
 
+def test_solve_edge_weights_rowwise_leaves_no_hard_spike():
+    """No candidate edge may get pi0 = 1.
+
+    A hard spike leaves G = spike ~ N(0, sigma0^2) with sigma0 = 1e-3, so the
+    edge cannot be recovered however strong the evidence. The budget-matched
+    normalisation of xi keeps every off-diagonal entry strictly interior.
+    """
+    D = 12
+    xi, _ = _fixture(D, seed=5)
+    pi0_i = np.full(D, 0.8)
+    pi0_ij, _ = solve_edge_weights_rowwise(xi, pi0_i)
+
+    offdiag = ~np.eye(D, dtype=bool)
+    assert pi0_ij[offdiag].max() < 1.0 - 1e-6, (
+        f"{(pi0_ij[offdiag] >= 1.0 - 1e-6).sum()} of {offdiag.sum()} candidates "
+        "are hard-clamped to the spike"
+    )
+
+
+def test_solve_edge_weights_rowwise_matches_budget_scaled_xi():
+    """With xi scaled to the row budget the QP solution is xi itself.
+
+    The data term and the sparsity constraint then agree, so the optimal
+    offset is zero and no mass is redistributed.
+    """
+    D = 12
+    xi, _ = _fixture(D, seed=5)
+    pi0_i = np.full(D, 0.8)
+    _, pi_k_ij = solve_edge_weights_rowwise(xi, pi0_i)
+
+    for i in range(D):
+        idx = np.arange(D) != i
+        row = xi[i, idx]
+        target = row * ((1.0 - pi0_i[i]) * (D - 1) / row.sum())
+        assert target.max() < 1.0, "fixture must not make the box bind"
+        assert np.allclose(pi_k_ij[i, idx], target, atol=1e-5), (
+            f"row {i}: solution departs from budget-scaled xi"
+        )
+
+
 def test_solve_edge_weights_rowwise_tracks_xi():
     """The QP fits pi_k to xi, so within a row the two should be co-monotone."""
     D = 12
@@ -125,6 +165,27 @@ def test_solve_spike_slab_diagonal_spike_satisfies_its_constraints():
     assert np.allclose(np.diag(pi_k_ij), 0.0, atol=1e-6)
     # eq 18: total off-diagonal spike mass
     assert np.isclose(pi0_ij[offdiag].sum(), pi0 * (D ** 2 - D), atol=1e-4)
+
+
+def test_solve_spike_slab_diagonal_spike_leaves_no_hard_spike():
+    D = 12
+    xi, _ = _fixture(D, seed=5)
+    pi0_ij, _, _ = solve_spike_slab_diagonal_spike(xi, pi0=0.8)
+
+    offdiag = ~np.eye(D, dtype=bool)
+    assert pi0_ij[offdiag].max() < 1.0 - 1e-6
+
+
+def test_solve_spike_slab_diagonal_spike_matches_budget_scaled_xi():
+    D = 12
+    xi, _ = _fixture(D, seed=5)
+    pi0 = 0.8
+    _, pi_k_ij, _ = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
+
+    offdiag = ~np.eye(D, dtype=bool)
+    target = xi * ((1.0 - pi0) * (D ** 2 - D) / xi[offdiag].sum())
+    assert target[offdiag].max() < 1.0, "fixture must not make the box bind"
+    assert np.allclose(pi_k_ij[offdiag], target[offdiag], atol=1e-5)
 
 
 def test_er_prior_is_symmetric():
