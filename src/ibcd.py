@@ -57,7 +57,6 @@ def main(args):
         pi0_ij, pi_k_ij = solve_edge_weights_rowwise(
             xi,
             pi0_i,
-            alpha_sf=args.alpha_sf,
         )
 
     elif args.prior.lower() == "er":
@@ -164,13 +163,6 @@ if __name__ == "__main__":
         "--output_dir",
         required=True,
         help="Directory to save all outputs.",
-    )
-
-    parser.add_argument(
-        "--alpha_sf",
-        type=float,
-        default=1.0,
-        help="Penalty parameter for SF prior (scale-free row-wise optimization). Default=1.0.",
     )
 
     parser.add_argument(

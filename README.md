@@ -80,7 +80,7 @@ inexpensive to reproduce on a CPU; the run above takes roughly 15 minutes on a
 ### Arguments ###
 ```
 usage: ibcd.py [-h] --data DATA --prior {sf,er} --output_dir OUTPUT_DIR
-               [--alpha_sf ALPHA_SF] [--alpha_er ALPHA_ER] [--num_warmup NUM_WARMUP]
+               [--alpha_er ALPHA_ER] [--num_warmup NUM_WARMUP]
                [--num_samples NUM_SAMPLES] [--num_chains NUM_CHAINS] [--epsilon EPSILON]
 
 IBCD pipeline. 1) Load data.csv (Y_matrix + target) 2) Run 2SLS 3) Choose SF (scale-free) or ER
@@ -93,7 +93,6 @@ options:
   --prior {sf,er}       Choice of empirical prior: 'sf' = scale-free, 'er' = Erdős–Rényi.
   --output_dir OUTPUT_DIR
                         Directory to save all outputs.
-  --alpha_sf ALPHA_SF   Penalty parameter for SF prior (scale-free row-wise optimization). Default=1.0.
   --alpha_er ALPHA_ER   Alpha for EM in ER prior. Controls shrinkage strength. Default=2.0.
   --num_warmup NUM_WARMUP
                         Number of NUTS warm-up iterations. Default = 300.

@@ -302,7 +302,7 @@ def test_end_to_end_outputs_are_well_formed():
         out = Path(tmp) / "out"
         ibcd.main(argparse.Namespace(
             data=str(path), prior="sf", output_dir=str(out),
-            alpha_sf=1.0, alpha_er=2.0,
+            alpha_er=2.0,
             num_warmup=20, num_samples=40, num_chains=1, epsilon=0.05,
         ))
 

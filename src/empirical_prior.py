@@ -251,12 +251,16 @@ def scale_free_degree(R):
     pi0 = 1 - P
     return pi0
 
-def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, symmetric=False):
-    """Edge-specific spike and slab weights, solved one row at a time.
+def solve_edge_weights_rowwise(xi, pi0_i):
+    """Solve for edge-specific spike and slab weights, one row at a time.
 
-    alpha_sf is retained for interface compatibility but has no effect:
-    scaling a quadratic objective does not move its minimiser under hard
-    constraints.
+    Args:
+        xi (np.ndarray): Symmetric D x D matrix of interaction strengths.
+        pi0_i (np.ndarray): Length-D vector of per-node spike proportions.
+
+    Returns:
+        pi0_ij (np.ndarray): Edge-specific spike weight matrix.
+        pi_k_ij (np.ndarray): Edge-specific slab weight matrix.
     """
     D = xi.shape[0]
     pi0_ij  = np.zeros((D, D))
@@ -284,11 +288,6 @@ def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, symmetric=False):
 
         pi0_ij[i, idx] = p0
         pi_k_ij[i, idx] = pk
-
-        if symmetric:
-            # optional: mirror to make undirected
-            pi0_ij[idx, i] = p0
-            pi_k_ij[idx, i] = pk
 
     # diagonal always spike
     np.fill_diagonal(pi0_ij, 1.0)
