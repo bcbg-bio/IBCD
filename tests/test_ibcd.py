@@ -275,12 +275,75 @@ def test_global_solver_matches_the_cvxpy_program():
 # scale_free_degree
 # --------------------------------------------------------------------------
 
+def _reference_scale_free_degree_qp(R):
+    """The cvxpy program scale_free_degree replaced. Returns P and its targets.
+
+    Fits an edge-probability matrix P in [0, 1] to the rescaled in- and
+    out-strengths of |R_hat|^2 by least squares.
+    """
+    import cvxpy as cp
+
+    D = R.shape[0]
+    A = np.abs(R) ** 2
+    np.fill_diagonal(A, 0)
+    theta_raw, phi_raw = A.sum(axis=1), A.sum(axis=0)
+    scale = (D - 1) / max(theta_raw.max(), phi_raw.max())
+    theta, phi = theta_raw * scale, phi_raw * scale
+
+    A_out = np.zeros((D, D * D))
+    A_in = np.zeros((D, D * D))
+    for i in range(D):
+        for j in range(D):
+            if i != j:
+                A_out[i, i * D + j] = 1
+                A_in[j, i * D + j] = 1
+    keep = np.ones(D * D, dtype=bool)
+    for i in range(D):
+        keep[i * D + i] = False
+    A_full = np.vstack([A_out[:, keep], A_in[:, keep]])
+
+    x = cp.Variable(A_full.shape[1])
+    cp.Problem(cp.Minimize(cp.sum_squares(A_full @ x - np.concatenate([theta, phi]))),
+               [x >= 0, x <= 1]).solve(solver=cp.ECOS)
+
+    P = np.zeros((D, D))
+    k = 0
+    for i in range(D):
+        for j in range(D):
+            if i != j:
+                P[i, j] = x.value[k]
+                k += 1
+    return P, theta, phi
+
+
 def test_scale_free_degree_returns_valid_probabilities():
     D = 10
     _, R = _fixture(D)
-    pi0 = scale_free_degree(R)
-    assert pi0.shape == (D, D)
-    assert pi0.min() >= -1e-6 and pi0.max() <= 1 + 1e-6
+    pi0_i = scale_free_degree(R)
+    assert pi0_i.shape == (D,)
+    assert pi0_i.min() >= 0.0 and pi0_i.max() <= 1.0
+
+
+def test_scale_free_degree_is_all_spike_when_R_carries_no_signal():
+    R = np.eye(5)
+    assert np.allclose(scale_free_degree(R), np.ones(5))
+
+
+def test_scale_free_degree_matches_the_cvxpy_program():
+    D = 10
+    _, R = _fixture(D)
+    pi0_i = scale_free_degree(R)
+    P, theta, phi = _reference_scale_free_degree_qp(R)
+
+    # only the row means of P feed the SF prior
+    assert np.allclose(pi0_i, 1.0 - P.sum(axis=1) / (D - 1), atol=1e-4)
+
+    # the closed form attains the out-strength targets exactly; the QP, being
+    # iterative, does not. ECOS misses them badly on some real inputs.
+    cf_rows = (1.0 - pi0_i) * (D - 1)
+    assert np.allclose(cf_rows, theta, atol=1e-12)
+    assert (np.sum((cf_rows - theta) ** 2)
+            <= np.sum((P.sum(axis=1) - theta) ** 2) + 1e-12)
 
 
 # --------------------------------------------------------------------------

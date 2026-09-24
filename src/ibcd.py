@@ -48,9 +48,7 @@ def main(args):
         # -------- Scale-free (SF) prior --------
         print("2) Using SF prior (Scale-Free)...")
         R = Rhat_df.values
-        pi0_mat = scale_free_degree(R)
-        offdiag_mask = ~np.eye(D, dtype=bool)
-        pi0_i = pi0_mat[offdiag_mask].reshape(D, D-1).mean(axis=1)
+        pi0_i = scale_free_degree(R)
 
         print("Estimated spike weight:", pi0_i)
         print("3) Running edge specific weights for SF...")

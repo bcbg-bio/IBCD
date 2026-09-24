@@ -1,12 +1,8 @@
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning, module="cvxpy")
-
 import pandas as pd
 import numpy as np
 import jax.numpy as jnp
 from jax.scipy.stats import norm
 import jax
-import cvxpy as cp
 from tqdm import tqdm
 
 
@@ -184,72 +180,39 @@ def solve_spike_slab_diagonal_spike(
     return pi0_sol, pik_sol, val
 
 def scale_free_degree(R):
-    """
-    Given a matrix R (numpy array), solve for P using a degree-matching
-    optimization, then return pi0 = 1 - P.
+    """Per-node spike proportions from the in- and out-strengths of R_hat.
+
+    Let A = |R_hat|^2 with a zero diagonal, theta_i = sum_j A_ij the
+    out-strength of node i and phi_j = sum_i A_ij the in-strength of node j.
+    The scale-free prior matches an edge-probability matrix P in [0, 1] to
+    those marginals after rescaling them so the largest becomes D - 1, the
+    most edges a node can have. Only the row means of P are used downstream,
+    and any P attaining the marginals has row sums theta_i * (D-1) / m with
+    m = max(max theta, max phi), so
+
+        pi0_i = 1 - (sum_j P_ij) / (D - 1) = 1 - theta_i / m
+
+    which needs no solver. theta_i <= m by construction, so pi0_i is in
+    [0, 1] without clipping.
 
     Args:
-        R (np.ndarray): Input square matrix of shape (D, D).
+        R (np.ndarray): D x D matrix of estimated total causal effects.
 
     Returns:
-        pi0 (np.ndarray): Matrix of shape (D, D), with pi0 = 1 - P.
+        np.ndarray: Length-D vector of per-node spike proportions.
     """
     D = R.shape[0]
 
-    # 1. Compute theta and phi
     A = np.abs(R)**2
     np.fill_diagonal(A, 0)
-    theta_raw = A.sum(axis=1)
-    phi_raw   = A.sum(axis=0)
+    theta = A.sum(axis=1)
+    phi = A.sum(axis=0)
 
-    scale = (D-1) / max(theta_raw.max(), phi_raw.max())
-    theta = theta_raw * scale
-    phi   = phi_raw * scale
+    m = max(theta.max(), phi.max())
+    if m <= 0:
+        return np.ones(D)
+    return 1.0 - theta / m
 
-    # 2. Build constraint matrices A_out and A_in
-    A_out = np.zeros((D, D*D))
-    A_in = np.zeros((D, D*D))
-    for i in range(D):
-        for j in range(D):
-            if i != j:
-                idx = i * D + j
-                A_out[i, idx] = 1
-                A_in[j, idx] = 1
-
-    # Remove diagonal entries
-    keep = np.ones(D*D, dtype=bool)
-    for i in range(D):
-        keep[i * D + i] = False
-    A_out = A_out[:, keep]
-    A_in = A_in[:, keep]
-
-    A_full = np.vstack([A_out, A_in])  # shape (2D, D^2 - D)
-    b_full = np.concatenate([theta, phi])
-    Nvar = A_full.shape[1]
-
-    # 3. Solve quadratic program
-    x = cp.Variable(Nvar)
-    objective = cp.Minimize(cp.sum_squares(A_full @ x - b_full))
-    constraints = [x >= 0, x <= 1]
-    prob = cp.Problem(objective, constraints)
-    prob.solve(solver=cp.ECOS)
-
-    P_flat = x.value
-    if P_flat is None:
-        raise RuntimeError("Solver failed: status %s" % prob.status)
-
-    # 4. Reconstruct P with zero diagonal
-    P = np.zeros((D, D))
-    k = 0
-    for i in range(D):
-        for j in range(D):
-            if i != j:
-                P[i, j] = P_flat[k]
-                k += 1
-
-    # 5. Return pi0
-    pi0 = 1 - P
-    return pi0
 
 def solve_edge_weights_rowwise(xi, pi0_i):
     """Solve for edge-specific spike and slab weights, one row at a time.
