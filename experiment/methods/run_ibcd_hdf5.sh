@@ -17,7 +17,6 @@ for f in train train_fold1 train_fold2 train_fold3 train_fold4 train_fold5; do
     python ibcd.py \
         --data "$DATA_FILE" \
         --prior sf \
-        --causal_order false \
         --output_dir "$OUT_DIR"
 done
 

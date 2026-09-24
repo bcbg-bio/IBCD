@@ -45,9 +45,6 @@ def main(args):
 
     D = xi.shape[0]
 
-    #dag_flag = (args.dag.lower() == "true")
-    causal_order_flag = (args.causal_order.lower() == "true")
-
     if args.prior.lower() == "sf":
         # -------- Scale-free (SF) prior --------
         print("2) Using SF prior (Scale-Free)...")
@@ -61,7 +58,6 @@ def main(args):
         pi0_ij, pi_k_ij = solve_edge_weights_rowwise(
             xi,
             pi0_i,
-            causal_order=causal_order_flag,
             alpha_sf=args.alpha_sf,
             solver=cp.ECOS,
         )
@@ -69,8 +65,8 @@ def main(args):
     elif args.prior.lower() == "er":
         # -------- Erdős–Rényi (ER) prior --------
         print("2) Using ER prior (Erdős–Rényi)...")
-        # Load off-diagonal or upper-tri entries depending on DAG
-        w, se_hat = load_R_and_SE_hat(Rhat_path, SE_hat_path, causal_order=causal_order_flag)
+        # Load all off-diagonal entries
+        w, se_hat = load_R_and_SE_hat(Rhat_path, SE_hat_path)
         #print(f"Shape of w: {w.shape}, Shape of se: {se_hat.shape}")
         pi0, pi_slabs, slab_scales = empirical_bayes_em(
             w,
@@ -164,13 +160,6 @@ if __name__ == "__main__":
         required=True,
         choices=["sf", "er"],
         help="Choice of empirical prior: 'sf' = scale-free, 'er' = Erdős–Rényi.",
-    )
-
-    parser.add_argument(
-        "--causal_order",
-        default="false",
-        choices=["true", "false"],
-        help="'false' = input variables are unordered, as in most real data (e.g. perturb-seq); 'true' = input variables are already in causal/topological order.",
     )
 
     parser.add_argument(

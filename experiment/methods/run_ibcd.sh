@@ -31,7 +31,6 @@ for dim in 50d 150d 250d 500d; do
                 python ibcd.py \
                     --data "$DATA_FILE" \
                     --prior "$graph" \
-                    --causal_order true \
                     --output_dir "$RUN_DIR"
             done
         done
