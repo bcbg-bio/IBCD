@@ -1,0 +1,8 @@
+.DS_Store
+experiment/methods/Project-BayesDAG/open_source/results/
+experiment/methods/Project-BayesDAG/open_source/data/Y_matrix/
+experiment/methods/Project-BayesDAG/open_source/mlruns/
+experiment/methods/Project-BayesDAG/open_source/poetry-installer-error-*.log
+experiment/methods/Project-BayesDAG/open_source/generate/Y_matrix.csv
+experiment/methods/Project-BayesDAG/open_source/generate/Y_matrix_std/
+experiment/methods/Project-BayesDAG/open_source/comparison/*.csv

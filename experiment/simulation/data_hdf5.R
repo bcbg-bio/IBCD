@@ -8,9 +8,9 @@ library(matrixStats)
 library(scales)
 library(caret)
 
-raw_h5ad <- "K562_essential_raw_singlecell_01.h5ad"
-gene_csv <- "test.csv"
-out_dir  <- "output"
+raw_h5ad <- "/Users/seongwoohan/Desktop/replogle/K562_essential_raw_singlecell_01.h5ad"
+gene_csv <- "/Users/seongwoohan/Desktop/replogle/test.csv"
+out_dir  <- "/Users/seongwoohan/Desktop/replogle"
 
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 ts <- function(...) message(format(Sys.time(), "%H:%M:%S"), " | ", ...)

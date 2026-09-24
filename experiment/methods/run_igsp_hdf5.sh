@@ -10,7 +10,7 @@ for f in train train_fold1 train_fold2 train_fold3 train_fold4 train_fold5; do
 
     python run_igsp.py \
         --y_path "$Y_FILE"  \
-        --t_path "$T_FILE" \
+        --t_path "$TARGETS_FILE" \
         --out_path "$OUT_FILE"
 done
 

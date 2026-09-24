@@ -15,7 +15,7 @@ from empirical_prior import (
     empirical_bayes_em,
     solve_spike_slab_diagonal_spike,
 )
-from model import matrix_model_spike_horseshoe, compute_lfsr
+from model import matrix_model_spike_horseshoe,matrix_model_spike_horseshoe_spectral, compute_lfsr
 from iv_regression import xi_norm, run_all_IV
 
 
@@ -87,8 +87,14 @@ def main(args):
 
     print("4) Running inference...")
 
+    model_fn = (
+        matrix_model_spike_horseshoe_spectral
+        if args.spectral_penalty
+        else matrix_model_spike_horseshoe
+    )
+
     kernel = NUTS(
-        matrix_model_spike_horseshoe,
+        model_fn,
         target_accept_prob=0.7,
         max_tree_depth=10,
         init_strategy=infer.init_to_median(num_samples=50),
@@ -166,6 +172,11 @@ if __name__ == "__main__":
         "--output_dir",
         required=True,
         help="Directory to save all outputs.",
+    )
+    parser.add_argument(
+        "--spectral_penalty",
+        action="store_true",
+        help="Apply the Gaussian spectral-radius penalty.",
     )
 
     parser.add_argument(
