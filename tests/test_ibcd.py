@@ -27,6 +27,7 @@ REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src"
 sys.path.insert(0, str(SRC))
 
+from model import convergent_draws  # noqa: E402
 from empirical_prior import (  # noqa: E402
     _project_to_budget,
     load_R_and_SE_hat,
@@ -347,10 +348,88 @@ def test_scale_free_degree_matches_the_cvxpy_program():
 
 
 # --------------------------------------------------------------------------
+# Truncated path sum and draw convergence
+# --------------------------------------------------------------------------
+
+def _dag(D, seed=0, density=0.15, scale=0.25):
+    """A strictly upper-triangular G, i.e. a DAG in the given variable order."""
+    rng = np.random.default_rng(seed)
+    G = np.triu(rng.normal(0, scale, size=(D, D)), 1)
+    G *= rng.random((D, D)) < density
+    return G
+
+
+def _series(G, order):
+    D = G.shape[0]
+    R = np.eye(D)
+    for _ in range(order):
+        R = np.eye(D) + G @ R
+    return R
+
+
+def test_series_equals_inverse_at_sufficient_order():
+    """For a DAG the two agree exactly once the order reaches the longest path."""
+    D = 20
+    G = _dag(D, seed=2)
+    exact = np.linalg.inv(np.eye(D) - G)
+    # G is nilpotent: G^D is identically zero, so order D-1 suffices
+    assert np.allclose(_series(G, D - 1), exact, atol=1e-12)
+    assert np.allclose(np.linalg.matrix_power(G, D), 0.0)
+
+
+def test_series_stays_bounded_where_the_inverse_blows_up():
+    """Near the singularity of (I - G) the inverse explodes; the sum does not.
+
+    This is the numerical reason to prefer the series: the inverse has a pole
+    the sampler can approach, and its gradients scale as ||(I - G)^-1||^2.
+    """
+    D = 20
+    G = _dag(D, seed=2)
+    G = G + 3.0 * G.T                                     # make it cyclic
+    G = G / (np.abs(np.linalg.eigvals(G)).max() * 1.001)  # push rho just under 1
+
+    inv_norm = np.linalg.norm(np.linalg.inv(np.eye(D) - G), 2)
+    series_norm = np.linalg.norm(_series(G, 24), 2)
+    assert np.isfinite(series_norm)
+    assert inv_norm > 20 * series_norm, (
+        f"inverse {inv_norm:.1f} vs series {series_norm:.1f}"
+    )
+
+
+def test_convergent_draws_separates_runaway_draws():
+    D = 8
+    good = np.stack([_dag(D, seed=s) for s in range(5)])
+    bad = good * 500.0  # far outside the region where sum_d G^d converges
+    draws = np.concatenate([good, bad])
+
+    keep, rho = convergent_draws(draws)
+    assert keep.shape == (10,) and rho.shape == (10,)
+    # a nilpotent G stays nilpotent under scaling, so rho is 0 for all of these
+    assert keep.all() and np.allclose(rho, 0.0)
+
+    # a genuinely cyclic draw with rho >= 1 must be dropped
+    cyc = np.stack([g + 3.0 * g.T for g in good]) * 5.0
+    keep2, rho2 = convergent_draws(np.concatenate([good, cyc]))
+    assert keep2[:5].all()
+    assert not keep2[5:].any(), f"cyclic draws must be dropped, rho={rho2[5:]}"
+
+
+def test_convergent_draws_threshold_is_the_spectral_radius():
+    D = 6
+    G = np.zeros((D, D))
+    G[0, 1] = G[1, 0] = 0.4          # 2-cycle, rho = 0.4
+    keep, rho = convergent_draws(G[None])
+    assert np.isclose(rho[0], 0.4) and keep[0]
+    G[0, 1] = G[1, 0] = 1.2          # rho = 1.2
+    keep, rho = convergent_draws(G[None])
+    assert np.isclose(rho[0], 1.2) and not keep[0]
+
+
+# --------------------------------------------------------------------------
 # End to end (slow)
 # --------------------------------------------------------------------------
 
-def test_end_to_end_outputs_are_well_formed():
+def _run_pipeline(truncated_series):
     """Run the real pipeline on a small subset of the shipped example data."""
     import argparse
     import ibcd
@@ -367,12 +446,16 @@ def test_end_to_end_outputs_are_well_formed():
             data=str(path), prior="sf", output_dir=str(out),
             alpha_er=2.0,
             num_warmup=20, num_samples=40, num_chains=1, epsilon=0.05,
+            truncated_series=truncated_series, series_order=24,
         ))
 
         pip = pd.read_csv(out / "pip.csv", index_col=0)
         G = pd.read_csv(out / "G.csv", index_col=0)
         lfsr = pd.read_csv(out / "lfsr.csv", index_col=0)
+    return keep, pip, G, lfsr
 
+
+def _check_outputs(keep, pip, G, lfsr):
     D = len(keep)
     for name, df in [("pip", pip), ("G", G), ("lfsr", lfsr)]:
         assert df.shape == (D, D), f"{name}.csv has shape {df.shape}"
@@ -382,11 +465,23 @@ def test_end_to_end_outputs_are_well_formed():
 
     assert pip.values.min() >= 0.0 and pip.values.max() <= 1.0
     assert lfsr.values.min() >= 0.0 and lfsr.values.max() <= 0.5
+    # no self-loops: the diagonal of G is zeroed in the model
+    assert np.allclose(np.diag(G.values), 0.0)
+    assert np.allclose(np.diag(pip.values), 0.0)
     # the posterior should not be degenerate: some edges get real support
     assert pip.values.max() > 0.5, "no edge reached PIP > 0.5"
 
 
-SLOW = {"test_end_to_end_outputs_are_well_formed"}
+def test_end_to_end_outputs_are_well_formed():
+    _check_outputs(*_run_pipeline(truncated_series=False))
+
+
+def test_end_to_end_outputs_are_well_formed_with_truncated_series():
+    _check_outputs(*_run_pipeline(truncated_series=True))
+
+
+SLOW = {"test_end_to_end_outputs_are_well_formed",
+        "test_end_to_end_outputs_are_well_formed_with_truncated_series"}
 
 
 def _main():

@@ -81,7 +81,8 @@ inexpensive to reproduce on a CPU; the run above takes roughly 15 minutes on a
 ```
 usage: ibcd.py [-h] --data DATA --prior {sf,er} --output_dir OUTPUT_DIR
                [--alpha_er ALPHA_ER] [--num_warmup NUM_WARMUP]
-               [--num_samples NUM_SAMPLES] [--num_chains NUM_CHAINS] [--epsilon EPSILON]
+               [--num_samples NUM_SAMPLES] [--num_chains NUM_CHAINS]
+               [--truncated_series] [--series_order SERIES_ORDER] [--epsilon EPSILON]
 
 IBCD pipeline. 1) Load data.csv (Y_matrix + target) 2) Run 2SLS 3) Choose SF (scale-free) or ER
 (Erdős–Rényi) empirical prior 4) Fit empricial Bayesian spike-and-slab on matrix normal model 5) Output G
@@ -100,6 +101,13 @@ options:
                         Number of posterior samples per chain after warm-up. Default = 1000.
   --num_chains NUM_CHAINS
                         Number of parallel MCMC chains. Default = 3.
+  --truncated_series    Compute R as a truncated path sum instead of inverting (I - G). The sum has no
+                        pole and bounded gradients, but costs roughly an order of magnitude more per
+                        gradient. Default is the inverse.
+  --series_order SERIES_ORDER
+                        Highest power retained in the truncated path sum for R = sum_d G^d. Exact once it
+                        reaches the longest directed path in the graph. Only used with --truncated_series.
+                        Default = 24.
   --epsilon EPSILON     Threshold for computing PIP: edges with |G| > epsilon are counted as active.
                         Default = 0.05.
 ```

@@ -1,5 +1,6 @@
 import os
 import argparse
+import warnings
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -14,7 +15,7 @@ from empirical_prior import (
     empirical_bayes_em,
     solve_spike_slab_diagonal_spike,
 )
-from model import matrix_model_spike_horseshoe, compute_lfsr
+from model import matrix_model_spike_horseshoe, compute_lfsr, convergent_draws
 from iv_regression import xi_norm, run_all_IV
 
 
@@ -104,6 +105,8 @@ def main(args):
         U_lower=U_lower,
         V_lower=V_lower,
         D=D,
+        truncated_series=args.truncated_series,
+        series_order=args.series_order,
     )
 
 
@@ -115,6 +118,39 @@ def main(args):
     np.save(os.path.join(args.output_dir, "G_draws.npy"), posterior)
 
     flat = posterior.reshape(-1, D, D)
+
+    # R = sum_d G^d only exists where rho(G) < 1. Draws outside that region
+    # have crossed the singularity of (I - G) and carry no information about
+    # the graph, so they are excluded from every summary below.
+    keep, rho = convergent_draws(flat)
+    n_total = keep.size
+    n_drop = int((~keep).sum())
+    if n_drop:
+        pct = 100.0 * n_drop / n_total
+        per_chain = (~keep).reshape(posterior.shape[0], -1).sum(axis=1)
+        detail = ", ".join(
+            f"chain {c}: {int(k)}/{keep.size // posterior.shape[0]}"
+            for c, k in enumerate(per_chain)
+        )
+        message = (
+            f"{n_drop} of {n_total} draws ({pct:.1f}%) have spectral radius >= 1 "
+            f"and were excluded ({detail}); max rho = {rho.max():.3g}"
+        )
+        if pct >= 10.0:
+            warnings.warn(
+                message + ". Treat these results with caution: a large "
+                "non-convergent fraction usually means one or more chains "
+                "failed to mix.",
+                RuntimeWarning,
+            )
+        else:
+            print(message)
+    if not keep.any():
+        raise RuntimeError(
+            "Every posterior draw has spectral radius >= 1; the sampler never "
+            "reached the region where the model is defined."
+        )
+    flat = flat[keep]
 
     posterior_mean = flat.mean(axis=0)
     pd.DataFrame(posterior_mean, columns=colnames, index=colnames).to_csv(
@@ -189,6 +225,27 @@ if __name__ == "__main__":
         type=int,
         default=3,
         help="Number of parallel MCMC chains. Default = 3.",
+    )
+
+    parser.add_argument(
+        "--truncated_series",
+        action="store_true",
+        help=(
+            "Compute R as a truncated path sum instead of inverting (I - G). "
+            "The sum has no pole and bounded gradients, but costs roughly an "
+            "order of magnitude more per gradient. Default is the inverse."
+        ),
+    )
+
+    parser.add_argument(
+        "--series_order",
+        type=int,
+        default=24,
+        help=(
+            "Highest power retained in the truncated path sum for "
+            "R = sum_d G^d. Exact once it reaches the longest directed path "
+            "in the graph. Only used with --truncated_series. Default = 24."
+        ),
     )
 
     parser.add_argument(
