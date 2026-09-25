@@ -15,6 +15,7 @@ The functions are plain `test_*` functions, so `pytest tests/test_ibcd.py`
 works too if pytest is available.
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -27,7 +28,7 @@ REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src"
 sys.path.insert(0, str(SRC))
 
-from model import convergent_draws  # noqa: E402
+from model import convergent_draws, posterior_diagnostics  # noqa: E402
 from empirical_prior import (  # noqa: E402
     _project_to_budget,
     load_R_and_SE_hat,
@@ -351,6 +352,33 @@ def test_scale_free_degree_matches_the_cvxpy_program():
 # Truncated path sum and draw convergence
 # --------------------------------------------------------------------------
 
+def keep_mask_count(diag):
+    return diag["n_draws_total"] - diag["nonconvergent"]["n"]
+
+
+def test_posterior_diagnostics_reports_what_the_run_did():
+    rng = np.random.default_rng(0)
+    C, N, D = 2, 30, 6
+    draws = np.stack([np.stack([_dag(D, seed=c * N + n) for n in range(N)])
+                      for c in range(C)])
+    draws[1, :5] *= 0.0                      # make a few draws trivially distinct
+    keep = np.ones(C * N, dtype=bool)
+    keep[[3, 7]] = False                     # pretend two draws were rejected
+    rho = rng.random(C * N)
+    extra = {"diverging": np.zeros((C, N), dtype=bool),
+             "num_steps": np.full((C, N), 7)}
+    extra["diverging"][0, :4] = True
+
+    d = posterior_diagnostics(draws, rho, keep, extra_fields=extra)
+    assert d["n_chains"] == C and d["n_draws_total"] == C * N and d["D"] == D
+    assert d["nonconvergent"]["n"] == 2
+    assert d["divergences"]["n"] == 4 and d["divergences"]["per_chain"] == [4, 0]
+    assert d["leapfrog"]["total"] == C * N * 7
+    assert d["spectral_radius"]["max"] <= 1.0
+    import json as _json
+    _json.dumps(d)                            # must be serialisable
+
+
 def _dag(D, seed=0, density=0.15, scale=0.25):
     """A strictly upper-triangular G, i.e. a DAG in the given variable order."""
     rng = np.random.default_rng(seed)
@@ -446,16 +474,18 @@ def _run_pipeline(truncated_series):
             data=str(path), prior="sf", output_dir=str(out),
             alpha_er=2.0,
             num_warmup=20, num_samples=40, num_chains=1, epsilon=0.05,
-            truncated_series=truncated_series, series_order=24,
+            truncated_series=truncated_series, series_order=24, seed=42,
         ))
 
         pip = pd.read_csv(out / "pip.csv", index_col=0)
         G = pd.read_csv(out / "G.csv", index_col=0)
         lfsr = pd.read_csv(out / "lfsr.csv", index_col=0)
-    return keep, pip, G, lfsr
+        with open(out / "diagnostics.json") as fh:
+            diag = json.load(fh)
+    return keep, pip, G, lfsr, diag
 
 
-def _check_outputs(keep, pip, G, lfsr):
+def _check_outputs(keep, pip, G, lfsr, diag):
     D = len(keep)
     for name, df in [("pip", pip), ("G", G), ("lfsr", lfsr)]:
         assert df.shape == (D, D), f"{name}.csv has shape {df.shape}"
@@ -470,6 +500,13 @@ def _check_outputs(keep, pip, G, lfsr):
     assert np.allclose(np.diag(pip.values), 0.0)
     # the posterior should not be degenerate: some edges get real support
     assert pip.values.max() > 0.5, "no edge reached PIP > 0.5"
+
+    # the run must leave a usable diagnostics record
+    for key in ("n_chains", "n_draws_total", "nonconvergent", "spectral_radius",
+                "divergences", "leapfrog", "runtime_seconds", "config"):
+        assert key in diag, f"diagnostics.json missing {key}"
+    assert diag["config"]["seed"] == 42
+    assert diag["nonconvergent"]["n"] + int(keep_mask_count(diag)) == diag["n_draws_total"]
 
 
 def test_end_to_end_outputs_are_well_formed():

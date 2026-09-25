@@ -1,5 +1,7 @@
 import os
 import argparse
+import json
+import time
 import warnings
 import jax
 import jax.numpy as jnp
@@ -15,7 +17,8 @@ from empirical_prior import (
     empirical_bayes_em,
     solve_spike_slab_diagonal_spike,
 )
-from model import matrix_model_spike_horseshoe, compute_lfsr, convergent_draws
+from model import (matrix_model_spike_horseshoe, compute_lfsr, convergent_draws,
+                   posterior_diagnostics)
 from iv_regression import xi_norm, run_all_IV
 
 
@@ -98,8 +101,9 @@ def main(args):
         progress_bar=True,
     )
 
+    t_start = time.perf_counter()
     mcmc.run(
-        jax.random.PRNGKey(42),
+        jax.random.PRNGKey(args.seed),
         obs_data=Rhat_df.values,
         pi0_ij=pi0_ij,
         U_lower=U_lower,
@@ -107,6 +111,7 @@ def main(args):
         D=D,
         truncated_series=args.truncated_series,
         series_order=args.series_order,
+        extra_fields=("num_steps", "diverging"),
     )
 
 
@@ -115,6 +120,8 @@ def main(args):
         jax.device_get(mcmc.get_samples(group_by_chain=True)["G"]),
         dtype=np.float32,
     )
+    elapsed = time.perf_counter() - t_start
+    extra = jax.device_get(mcmc.get_extra_fields(group_by_chain=True))
     np.save(os.path.join(args.output_dir, "G_draws.npy"), posterior)
 
     flat = posterior.reshape(-1, D, D)
@@ -150,6 +157,51 @@ def main(args):
             "Every posterior draw has spectral radius >= 1; the sampler never "
             "reached the region where the model is defined."
         )
+
+    diagnostics = posterior_diagnostics(posterior, rho, keep, extra_fields=extra,
+                                        seed=args.seed)
+    diagnostics["runtime_seconds"] = float(elapsed)
+    diagnostics["config"] = {
+        "data": args.data,
+        "prior": args.prior,
+        "seed": args.seed,
+        "num_warmup": args.num_warmup,
+        "num_samples": args.num_samples,
+        "num_chains": args.num_chains,
+        "truncated_series": bool(args.truncated_series),
+        "series_order": args.series_order if args.truncated_series else None,
+        "epsilon": args.epsilon,
+    }
+    with open(os.path.join(args.output_dir, "diagnostics.json"), "w") as fh:
+        json.dump(diagnostics, fh, indent=2)
+
+    dg = diagnostics
+    issues = []
+    if dg.get("r_hat", {}).get("max", 0.0) > 1.05:
+        issues.append(f"max r_hat {dg['r_hat']['max']:.3f} > 1.05")
+    if dg.get("divergences", {}).get("pct", 0.0) > 5.0:
+        issues.append(f"{dg['divergences']['pct']:.1f}% of transitions diverged")
+    if dg.get("ess", {}).get("n_nonpositive_raw", 0) > 0:
+        issues.append(
+            f"{dg['ess']['n_nonpositive_raw']} entries had a non-positive ESS estimate"
+        )
+    if issues:
+        warnings.warn(
+            "Sampler did not converge cleanly: " + "; ".join(issues)
+            + ". See diagnostics.json.",
+            RuntimeWarning,
+        )
+
+    print(
+        "5) Diagnostics: "
+        f"divergences {dg.get('divergences', {}).get('n', 'NA')}"
+        f" ({dg.get('divergences', {}).get('pct', float('nan')):.1f}%), "
+        f"max r_hat {dg.get('r_hat', {}).get('max', float('nan')):.4f}, "
+        f"min ESS {dg.get('ess', {}).get('min', float('nan')):.0f}, "
+        f"rho median {dg['spectral_radius']['median']:.3f} max {dg['spectral_radius']['max']:.3g}, "
+        f"{elapsed:.1f}s"
+    )
+
     flat = flat[keep]
 
     posterior_mean = flat.mean(axis=0)
@@ -225,6 +277,13 @@ if __name__ == "__main__":
         type=int,
         default=3,
         help="Number of parallel MCMC chains. Default = 3.",
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="PRNG seed for MCMC. Default = 42.",
     )
 
     parser.add_argument(

@@ -1,5 +1,6 @@
 import numpyro
 import numpyro.distributions as dist
+from numpyro.diagnostics import split_gelman_rubin, effective_sample_size
 import jax.numpy as jnp
 import arviz as az
 import numpy as np
@@ -91,6 +92,107 @@ def convergent_draws(G_draws, max_spectral_radius=1.0):
     flat = g.reshape(-1, g.shape[-2], g.shape[-1])
     rho = np.abs(np.linalg.eigvals(flat)).max(axis=1)
     return rho < max_spectral_radius, rho
+
+
+def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
+                          max_ess_entries=5000, seed=0):
+    """Summarise sampler behaviour and draw validity for one run.
+
+    Convergence statistics are computed over the entries of G. ESS is
+    estimated on a random subsample of entries, since an autocorrelation
+    estimate per entry is O(D^2) and D can be 500.
+
+    Parameters:
+        G_draws (array): Posterior draws, shape (chains, draws, D, D).
+        rho (array): Spectral radius of each flattened draw.
+        keep (array): Boolean mask over flattened draws.
+        extra_fields (dict): numpyro extra fields grouped by chain; the keys
+            'diverging' and 'num_steps' are used when present.
+        max_ess_entries (int): Cap on how many entries of G enter the ESS
+            estimate.
+        seed (int): Seed for choosing that subsample.
+
+    Returns:
+        dict: JSON-serialisable diagnostics.
+    """
+    g = np.asarray(G_draws)
+    n_chains, n_draws, D, _ = g.shape
+    keep = np.asarray(keep)
+    rho = np.asarray(rho)
+
+    out = {
+        "n_chains": int(n_chains),
+        "n_draws_per_chain": int(n_draws),
+        "n_draws_total": int(keep.size),
+        "D": int(D),
+    }
+
+    # draws outside the region where R = sum_d G^d converges
+    per_chain = (~keep).reshape(n_chains, n_draws).sum(axis=1)
+    out["nonconvergent"] = {
+        "n": int((~keep).sum()),
+        "pct": float(100.0 * (~keep).mean()),
+        "per_chain": [int(x) for x in per_chain],
+    }
+    out["spectral_radius"] = {
+        k: float(v) for k, v in zip(
+            ["min", "median", "p95", "p99", "max"],
+            np.percentile(rho, [0, 50, 95, 99, 100]),
+        )
+    }
+
+    # convergence over the entries of G, on the retained draws only
+    offdiag = ~np.eye(D, dtype=bool)
+    kept = keep.reshape(n_chains, n_draws)
+    usable = kept.all(axis=1)
+    if usable.sum() >= 2:
+        sub = g[usable][:, :, offdiag]
+        try:
+            rhat = np.asarray(split_gelman_rubin(sub))
+            out["r_hat"] = {
+                "max": float(np.nanmax(rhat)),
+                "median": float(np.nanmedian(rhat)),
+                "frac_above_1_01": float(np.nanmean(rhat > 1.01)),
+            }
+        except Exception as exc:          # noqa: BLE001
+            out["r_hat"] = {"error": str(exc)}
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(sub.shape[-1], size=min(max_ess_entries, sub.shape[-1]),
+                         replace=False)
+        try:
+            ess = np.asarray(effective_sample_size(sub[..., idx]))
+            # The autocorrelation estimator can return non-positive values when
+            # the chains are short or badly mixed. Those carry no information,
+            # so floor them at zero and record how many there were.
+            n_bad = int(np.sum(~(ess > 0)))
+            out["ess"] = {
+                "min": float(np.nanmin(np.maximum(ess, 0.0))),
+                "median": float(np.nanmedian(np.maximum(ess, 0.0))),
+                "n_entries_used": int(idx.size),
+                "n_nonpositive_raw": n_bad,
+            }
+        except Exception as exc:          # noqa: BLE001
+            out["ess"] = {"error": str(exc)}
+    else:
+        out["r_hat"] = {"note": "fewer than two chains free of non-convergent draws"}
+        out["ess"] = {"note": "fewer than two chains free of non-convergent draws"}
+
+    if extra_fields:
+        if "diverging" in extra_fields:
+            dv = np.asarray(extra_fields["diverging"])
+            out["divergences"] = {
+                "n": int(dv.sum()),
+                "pct": float(100.0 * dv.mean()),
+                "per_chain": [int(x) for x in dv.reshape(n_chains, -1).sum(axis=1)],
+            }
+        if "num_steps" in extra_fields:
+            ns = np.asarray(extra_fields["num_steps"])
+            out["leapfrog"] = {
+                "total": int(ns.sum()),
+                "mean_per_iter": float(ns.mean()),
+                "pct_at_max_tree_depth": float(100.0 * (ns >= 1023).mean()),
+            }
+    return out
 
 
 def compute_lfsr(flat_samples):
