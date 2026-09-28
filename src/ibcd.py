@@ -88,8 +88,8 @@ def main(args):
 
     kernel = NUTS(
         matrix_model_spike_horseshoe,
-        target_accept_prob=0.7,
-        max_tree_depth=10,
+        target_accept_prob=args.target_accept_prob,
+        max_tree_depth=args.max_tree_depth,
         init_strategy=infer.init_to_median(num_samples=50),
     )
 
@@ -124,7 +124,8 @@ def main(args):
         D=D,
         truncated_series=args.truncated_series,
         series_order=args.series_order,
-        extra_fields=("num_steps", "diverging"),
+        extra_fields=("num_steps", "diverging", "accept_prob",
+                      "adapt_state.step_size"),
     )
 
 
@@ -185,6 +186,8 @@ def main(args):
             "num_warmup": args.num_warmup,
             "num_samples": args.num_samples,
             "num_chains": args.num_chains,
+            "target_accept_prob": args.target_accept_prob,
+            "max_tree_depth": args.max_tree_depth,
             "truncated_series": bool(args.truncated_series),
             "series_order": args.series_order if args.truncated_series else None,
             "epsilon": args.epsilon,
@@ -215,6 +218,8 @@ def main(args):
             f" ({dg.get('divergences', {}).get('pct', float('nan')):.1f}%), "
             f"max r_hat {dg.get('r_hat', {}).get('max', float('nan')):.4f}, "
             f"min ESS {dg.get('ess', {}).get('min', float('nan')):.0f}, "
+            f"step size {dg.get('step_size', {}).get('median', float('nan')):.2e}, "
+            f"accept {dg.get('accept_prob', {}).get('mean', float('nan')):.2f}, "
             f"rho median {dg['spectral_radius']['median']:.3f} max {dg['spectral_radius']['max']:.3g}, "
             f"{elapsed:.1f}s"
         )
@@ -294,6 +299,27 @@ if __name__ == "__main__":
         type=int,
         default=3,
         help="Number of parallel MCMC chains. Default = 3.",
+    )
+
+    parser.add_argument(
+        "--target_accept_prob",
+        type=float,
+        default=0.7,
+        help=(
+            "NUTS target acceptance probability. Raising it shrinks the "
+            "adapted step size, which reduces divergences at the cost of "
+            "longer trajectories. Default = 0.7."
+        ),
+    )
+
+    parser.add_argument(
+        "--max_tree_depth",
+        type=int,
+        default=10,
+        help=(
+            "Maximum NUTS tree depth; each iteration costs at most "
+            "2^depth - 1 leapfrog steps. Default = 10."
+        ),
     )
 
     parser.add_argument(

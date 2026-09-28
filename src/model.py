@@ -178,6 +178,21 @@ def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
         out["ess"] = {"note": "fewer than two chains free of non-convergent draws"}
 
     if extra_fields:
+        # Step size and achieved acceptance are how a target_accept_prob change
+        # shows up: raising the target shrinks the step, which trades
+        # divergences for longer trajectories.
+        if "adapt_state.step_size" in extra_fields:
+            ss = np.asarray(extra_fields["adapt_state.step_size"]).reshape(n_chains, -1)
+            out["step_size"] = {
+                "per_chain": [float(x) for x in ss[:, -1]],
+                "median": float(np.median(ss[:, -1])),
+            }
+        if "accept_prob" in extra_fields:
+            ap = np.asarray(extra_fields["accept_prob"]).reshape(n_chains, -1)
+            out["accept_prob"] = {
+                "mean": float(np.nanmean(ap)),
+                "per_chain": [float(x) for x in np.nanmean(ap, axis=1)],
+            }
         if "diverging" in extra_fields:
             dv = np.asarray(extra_fields["diverging"])
             out["divergences"] = {

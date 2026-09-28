@@ -366,7 +366,9 @@ def test_posterior_diagnostics_reports_what_the_run_did():
     keep[[3, 7]] = False                     # pretend two draws were rejected
     rho = rng.random(C * N)
     extra = {"diverging": np.zeros((C, N), dtype=bool),
-             "num_steps": np.full((C, N), 7)}
+             "num_steps": np.full((C, N), 7),
+             "accept_prob": np.full((C, N), 0.83),
+             "adapt_state.step_size": np.full((C, N), 3e-3)}
     extra["diverging"][0, :4] = True
 
     d = posterior_diagnostics(draws, rho, keep, extra_fields=extra)
@@ -374,6 +376,9 @@ def test_posterior_diagnostics_reports_what_the_run_did():
     assert d["nonconvergent"]["n"] == 2
     assert d["divergences"]["n"] == 4 and d["divergences"]["per_chain"] == [4, 0]
     assert d["leapfrog"]["total"] == C * N * 7
+    assert np.isclose(d["step_size"]["median"], 3e-3)
+    assert d["step_size"]["per_chain"] == [3e-3, 3e-3]
+    assert np.isclose(d["accept_prob"]["mean"], 0.83)
     assert d["spectral_radius"]["max"] <= 1.0
     import json as _json
     _json.dumps(d)                            # must be serialisable
@@ -575,6 +580,7 @@ def _run_pipeline(truncated_series, save_diagnostics=True):
             alpha_er=2.0,
             num_warmup=20, num_samples=40, num_chains=1, epsilon=0.05,
             chain_method="vectorized",
+            target_accept_prob=0.7, max_tree_depth=10,
             truncated_series=truncated_series, series_order=24, seed=42,
             save_diagnostics=save_diagnostics,
         ))
@@ -610,9 +616,12 @@ def _check_outputs(keep, pip, G, lfsr, diag):
         return
     # when requested, the run must leave a usable diagnostics record
     for key in ("n_chains", "n_draws_total", "nonconvergent", "spectral_radius",
-                "divergences", "leapfrog", "runtime_seconds", "config"):
+                "divergences", "leapfrog", "step_size", "accept_prob",
+                "runtime_seconds", "config"):
         assert key in diag, f"diagnostics.json missing {key}"
     assert diag["config"]["seed"] == 42
+    assert diag["config"]["target_accept_prob"] == 0.7
+    assert diag["config"]["max_tree_depth"] == 10
     assert diag["nonconvergent"]["n"] + int(keep_mask_count(diag)) == diag["n_draws_total"]
 
 
