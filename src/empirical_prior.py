@@ -271,3 +271,84 @@ def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, symmetri
     np.fill_diagonal(pi_k_ij, 0.0)
 
     return pi0_ij, pi_k_ij
+
+
+def scale_free_degree_fast(R: np.ndarray) -> np.ndarray:
+    """
+    Solve Eq. 13 using matrix row/column sums on 2-hop reachability-oriented
+    empirical adjacency A_ij = |R_ij|^2 * I((A + A^2)_ij > (A + A^2)_ji),
+    scaled to the effective top-hub degree d_max = (sum_j A_{i*, j})^2 / sum_j A_{i*, j}^2.
+    """
+    D = R.shape[0]
+    A = np.abs(R) ** 2
+    np.fill_diagonal(A, 0.0)
+    S = A + A @ A
+    A = A * (S > S.T)
+    theta_raw = A.sum(axis=1)
+    phi_raw = A.sum(axis=0)
+    i_max = int(np.argmax(theta_raw))
+    d_max = (A[i_max].sum() ** 2) / (np.square(A[i_max]).sum() + 1e-12)
+    scale = d_max / max(theta_raw.max(), phi_raw.max())
+    theta = theta_raw * scale
+    phi = phi_raw * scale
+    P_var = cp.Variable((D, D), nonneg=True)
+    constraints = [P_var <= 1.0, cp.diag(P_var) == 0.0]
+    objective = cp.Minimize(
+        cp.sum_squares(cp.sum(P_var, axis=1) - theta)
+        + cp.sum_squares(cp.sum(P_var, axis=0) - phi)
+    )
+    prob = cp.Problem(objective, constraints)
+    prob.solve(solver=cp.OSQP, verbose=False)
+    P = np.clip(P_var.value, 0.0, 1.0)
+    np.fill_diagonal(P, 0.0)
+    return 1.0 - P
+
+
+def solve_edge_weights_rowwise_directional(
+    xi: np.ndarray, R: np.ndarray, pi0_i: np.ndarray, alpha_sf: float = 1.0
+):
+    """
+    Solve Eqs. 14-19 over the full off-diagonal row j != i using
+    reachability-oriented psi_ij = xi_ij * A_ij and inverse-signal weight
+    w_ij = 1 / sqrt(xnorm_ij).
+    """
+    D = xi.shape[0]
+    A = np.abs(R) ** 2
+    np.fill_diagonal(A, 0.0)
+    S = A + A @ A
+    A = A * (S > S.T)
+    psi = xi * A
+    pi0_ij = np.zeros((D, D))
+    pi_k_ij = np.zeros((D, D))
+
+    n = D - 1
+    p0 = cp.Variable(n, nonneg=True)
+    pk = cp.Variable(n, nonneg=True)
+    sqrt_w_param = cp.Parameter(n, nonneg=True)
+    wx_param = cp.Parameter(n, nonneg=True)
+    w1mx_param = cp.Parameter(n, nonneg=True)
+    target_sum_param = cp.Parameter(nonneg=True)
+    cons = [p0 + pk == 1.0, cp.sum(p0) == target_sum_param]
+    obj = cp.sum_squares(cp.multiply(sqrt_w_param, pk) - wx_param) + cp.sum_squares(
+        cp.multiply(sqrt_w_param, p0) - w1mx_param
+    )
+    prob = cp.Problem(cp.Minimize(alpha_sf * obj), cons)
+
+    for i in range(D):
+        idx = np.r_[np.arange(0, i), np.arange(i + 1, D)]
+        row = psi[i, idx]
+        m = row.max() if row.max() > 0 else 1.0
+        xnorm = np.clip(row / m, 0.0, 1.0)
+        sqrt_w = 1.0 / np.sqrt(xnorm + 1e-4)
+        sqrt_w_param.value = sqrt_w
+        wx_param.value = sqrt_w * xnorm
+        w1mx_param.value = sqrt_w * (1.0 - xnorm)
+        target_sum_param.value = float(pi0_i[i]) * n
+        prob.solve(solver=cp.OSQP, warm_start=True, verbose=False)
+
+        pi0_ij[i, idx] = p0.value
+        pi_k_ij[i, idx] = pk.value
+
+    np.fill_diagonal(pi0_ij, 1.0)
+    np.fill_diagonal(pi_k_ij, 0.0)
+    return pi0_ij, pi_k_ij

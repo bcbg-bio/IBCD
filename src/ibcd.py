@@ -10,7 +10,9 @@ from numpyro.infer import MCMC, NUTS
 
 from empirical_prior import (
     scale_free_degree,
+    scale_free_degree_fast,
     solve_edge_weights_rowwise,
+    solve_edge_weights_rowwise_directional,
     load_R_and_SE_hat,
     empirical_bayes_em,
     solve_spike_slab_diagonal_spike,
@@ -21,6 +23,15 @@ from iv_regression import xi_norm, run_all_IV
 
 def main(args):
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if getattr(args, "require_gpu", False):
+        gpu_devices = [device for device in jax.devices() if device.platform == "gpu"]
+        if len(gpu_devices) < args.num_chains:
+            raise RuntimeError(
+                f"Requested {args.num_chains} parallel GPU chains, but JAX sees "
+                f"only {len(gpu_devices)} GPU device(s): {jax.devices()}"
+            )
+        print("JAX GPU devices:", gpu_devices)
 
     df = pd.read_csv(args.data)
 
@@ -62,6 +73,26 @@ def main(args):
             solver=cp.ECOS,
         )
 
+    elif args.prior.lower() == "sf_directional":
+        # -------- Directional full-R-hat scale-free prior --------
+        print("2) Using directional full-R-hat SF prior...")
+        R = Rhat_df.values
+        pi0_mat = scale_free_degree_fast(R)
+        offdiag_mask = ~np.eye(D, dtype=bool)
+        pi0_i = pi0_mat[offdiag_mask].reshape(D, D - 1).mean(axis=1)
+
+        print(
+            "Estimated per-node spike weights (min / mean / max): "
+            f"{pi0_i.min():.4f} / {pi0_i.mean():.4f} / {pi0_i.max():.4f}"
+        )
+        print("3) Running directional edge-specific weights for SF...")
+        pi0_ij, pi_k_ij = solve_edge_weights_rowwise_directional(
+            xi,
+            R,
+            pi0_i,
+            alpha_sf=args.alpha_sf,
+        )
+
     elif args.prior.lower() == "er":
         # -------- Erdős–Rényi (ER) prior --------
         print("2) Using ER prior (Erdős–Rényi)...")
@@ -80,7 +111,7 @@ def main(args):
         pi0_ij, pi_k_ij, _ = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
 
     else:
-        raise ValueError("args.prior must be 'sf' or 'er'.")
+        raise ValueError("args.prior must be 'sf', 'sf_directional', or 'er'.")
 
     U_lower = jnp.linalg.cholesky(jnp.array(U_mat.values))
     V_lower = jnp.linalg.cholesky(jnp.array(V_mat.values))
@@ -105,6 +136,11 @@ def main(args):
         num_warmup=args.num_warmup,
         num_samples=args.num_samples,
         num_chains=args.num_chains,
+        chain_method=(
+            "parallel"
+            if jax.local_device_count() >= args.num_chains
+            else "vectorized"
+        ),
         progress_bar=True,
     )
 
@@ -149,7 +185,7 @@ if __name__ == "__main__":
             "IBCD pipeline.\n"
             "1) Load data.csv (observation + intervention)\n"
             "2) Run 2SLS\n"
-            "3) Choose SF (scale-free) or ER (Erdős–Rényi) empirical prior\n"
+            "3) Choose SF, directional SF, or ER empirical prior\n"
             "4) Fit empirical Bayesian spike-and-slab prior on matrix normal model\n"
             "5) Output G, PIP, and LFSR.\n"
         )
@@ -164,8 +200,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prior",
         required=True,
-        choices=["sf", "er"],
-        help="Choice of empirical prior: 'sf' = scale-free, 'er' = Erdős–Rényi.",
+        choices=["sf", "sf_directional", "er"],
+        help=(
+            "Choice of empirical prior: 'sf' = original scale-free, "
+            "'sf_directional' = order-free directional full-R-hat scale-free, "
+            "'er' = Erdős–Rényi."
+        ),
     )
 
     parser.add_argument(
@@ -212,6 +252,15 @@ if __name__ == "__main__":
         type=int,
         default=3,
         help="Number of parallel MCMC chains. Default = 3.",
+    )
+
+    parser.add_argument(
+        "--require_gpu",
+        action="store_true",
+        help=(
+            "Fail unless JAX sees at least one GPU per MCMC chain. "
+            "Use this to prevent accidental CPU execution."
+        ),
     )
 
     parser.add_argument(
