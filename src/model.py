@@ -95,7 +95,7 @@ def convergent_draws(G_draws, max_spectral_radius=1.0):
 
 
 def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
-                          max_ess_entries=5000, seed=0):
+                          max_ess_entries=5000, seed=0, max_tree_depth=12):
     """Summarise sampler behaviour and draw validity for one run.
 
     Convergence statistics are computed over the entries of G. ESS is
@@ -111,6 +111,8 @@ def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
         max_ess_entries (int): Cap on how many entries of G enter the ESS
             estimate.
         seed (int): Seed for choosing that subsample.
+        max_tree_depth (int): The sampler's tree-depth limit, used to work out
+            how many leapfrog steps a saturated iteration takes.
 
     Returns:
         dict: JSON-serialisable diagnostics.
@@ -202,10 +204,14 @@ def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
             }
         if "num_steps" in extra_fields:
             ns = np.asarray(extra_fields["num_steps"])
+            # A saturated iteration takes 2^max_tree_depth - 1 steps, so the
+            # cap depends on the sampler setting and cannot be hardcoded.
+            cap = 2 ** int(max_tree_depth) - 1
             out["leapfrog"] = {
                 "total": int(ns.sum()),
                 "mean_per_iter": float(ns.mean()),
-                "pct_at_max_tree_depth": float(100.0 * (ns >= 1023).mean()),
+                "max_leapfrog_steps": int(cap),
+                "pct_at_max_tree_depth": float(100.0 * (ns >= cap).mean()),
             }
     return out
 

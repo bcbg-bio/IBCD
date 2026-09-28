@@ -379,6 +379,23 @@ def test_posterior_diagnostics_reports_what_the_run_did():
     assert np.isclose(d["step_size"]["median"], 3e-3)
     assert d["step_size"]["per_chain"] == [3e-3, 3e-3]
     assert np.isclose(d["accept_prob"]["mean"], 0.83)
+
+    # the saturation cap follows max_tree_depth rather than being hardcoded
+    assert d["leapfrog"]["max_leapfrog_steps"] == 2 ** 12 - 1   # the default
+    extra_sat = dict(extra, num_steps=np.full((C, N), 2 ** 12 - 1))
+    d10 = posterior_diagnostics(draws, rho, keep, extra_fields=extra_sat,
+                                max_tree_depth=10)
+    d12 = posterior_diagnostics(draws, rho, keep, extra_fields=extra_sat,
+                                max_tree_depth=12)
+    assert d10["leapfrog"]["max_leapfrog_steps"] == 1023
+    assert d12["leapfrog"]["max_leapfrog_steps"] == 4095
+    # 4095 steps saturates at depth 12 and also exceeds the depth-10 cap
+    assert d10["leapfrog"]["pct_at_max_tree_depth"] == 100.0
+    assert d12["leapfrog"]["pct_at_max_tree_depth"] == 100.0
+    # ... but 1023 steps only saturates at depth 10
+    extra_mid = dict(extra, num_steps=np.full((C, N), 1023))
+    assert posterior_diagnostics(draws, rho, keep, extra_fields=extra_mid,
+                                 max_tree_depth=12)["leapfrog"]["pct_at_max_tree_depth"] == 0.0
     assert d["spectral_radius"]["max"] <= 1.0
     import json as _json
     _json.dumps(d)                            # must be serialisable

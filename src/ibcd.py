@@ -177,7 +177,8 @@ def main(args):
     # non-convergent draws above is not optional, since it changes the outputs.
     if args.save_diagnostics:
         diagnostics = posterior_diagnostics(posterior, rho, keep,
-                                            extra_fields=extra, seed=args.seed)
+                                            extra_fields=extra, seed=args.seed,
+                                            max_tree_depth=args.max_tree_depth)
         diagnostics["runtime_seconds"] = float(elapsed)
         diagnostics["config"] = {
             "data": args.data,
@@ -283,8 +284,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_warmup",
         type=int,
-        default=300,
-        help="Number of NUTS warm-up iterations. Default = 300.",
+        default=1000,
+        help="Number of NUTS warm-up iterations. Default = 1000.",
     )
 
     parser.add_argument(
@@ -304,21 +305,21 @@ if __name__ == "__main__":
     parser.add_argument(
         "--target_accept_prob",
         type=float,
-        default=0.7,
+        default=0.9,
         help=(
             "NUTS target acceptance probability. Raising it shrinks the "
             "adapted step size, which reduces divergences at the cost of "
-            "longer trajectories. Default = 0.7."
+            "longer trajectories. Default = 0.9."
         ),
     )
 
     parser.add_argument(
         "--max_tree_depth",
         type=int,
-        default=10,
+        default=12,
         help=(
             "Maximum NUTS tree depth; each iteration costs at most "
-            "2^depth - 1 leapfrog steps. Default = 10."
+            "2^depth - 1 leapfrog steps. Default = 12."
         ),
     )
 

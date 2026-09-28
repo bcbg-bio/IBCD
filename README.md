@@ -82,6 +82,8 @@ inexpensive to reproduce on a CPU; the run above takes roughly 15 minutes on a
 usage: ibcd.py [-h] --data DATA --prior {sf,er} --output_dir OUTPUT_DIR
                [--alpha_er ALPHA_ER] [--num_warmup NUM_WARMUP]
                [--num_samples NUM_SAMPLES] [--num_chains NUM_CHAINS]
+               [--target_accept_prob TARGET_ACCEPT_PROB]
+               [--max_tree_depth MAX_TREE_DEPTH]
                [--chain_method {parallel,sequential,vectorized}]
                [--save_diagnostics] [--seed SEED] [--truncated_series]
                [--series_order SERIES_ORDER] [--epsilon EPSILON]
@@ -98,11 +100,17 @@ options:
                         Directory to save all outputs.
   --alpha_er ALPHA_ER   Alpha for EM in ER prior. Controls shrinkage strength. Default=2.0.
   --num_warmup NUM_WARMUP
-                        Number of NUTS warm-up iterations. Default = 300.
+                        Number of NUTS warm-up iterations. Default = 1000.
   --num_samples NUM_SAMPLES
                         Number of posterior samples per chain after warm-up. Default = 1000.
   --num_chains NUM_CHAINS
                         Number of parallel MCMC chains. Default = 3.
+  --target_accept_prob TARGET_ACCEPT_PROB
+                        NUTS target acceptance probability. Raising it shrinks the adapted step size, which
+                        reduces divergences at the cost of longer trajectories. Default = 0.9.
+  --max_tree_depth MAX_TREE_DEPTH
+                        Maximum NUTS tree depth; each iteration costs at most 2^depth - 1 leapfrog steps.
+                        Default = 12.
   --chain_method {parallel,sequential,vectorized}
                         How to draw multiple chains. 'vectorized' maps them onto one device, which is the
                         only form of within-process parallelism available when CUDA exposes a single device,
