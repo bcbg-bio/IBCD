@@ -457,7 +457,7 @@ def test_convergent_draws_threshold_is_the_spectral_radius():
 # End to end (slow)
 # --------------------------------------------------------------------------
 
-def _run_pipeline(truncated_series):
+def _run_pipeline(truncated_series, save_diagnostics=True):
     """Run the real pipeline on a small subset of the shipped example data."""
     import argparse
     import ibcd
@@ -475,13 +475,17 @@ def _run_pipeline(truncated_series):
             alpha_er=2.0,
             num_warmup=20, num_samples=40, num_chains=1, epsilon=0.05,
             truncated_series=truncated_series, series_order=24, seed=42,
+            save_diagnostics=save_diagnostics,
         ))
 
         pip = pd.read_csv(out / "pip.csv", index_col=0)
         G = pd.read_csv(out / "G.csv", index_col=0)
         lfsr = pd.read_csv(out / "lfsr.csv", index_col=0)
-        with open(out / "diagnostics.json") as fh:
-            diag = json.load(fh)
+        diag_path = out / "diagnostics.json"
+        assert diag_path.exists() == save_diagnostics, (
+            "diagnostics.json presence must follow --save_diagnostics"
+        )
+        diag = json.load(diag_path.open()) if save_diagnostics else None
     return keep, pip, G, lfsr, diag
 
 
@@ -501,7 +505,9 @@ def _check_outputs(keep, pip, G, lfsr, diag):
     # the posterior should not be degenerate: some edges get real support
     assert pip.values.max() > 0.5, "no edge reached PIP > 0.5"
 
-    # the run must leave a usable diagnostics record
+    if diag is None:
+        return
+    # when requested, the run must leave a usable diagnostics record
     for key in ("n_chains", "n_draws_total", "nonconvergent", "spectral_radius",
                 "divergences", "leapfrog", "runtime_seconds", "config"):
         assert key in diag, f"diagnostics.json missing {key}"
@@ -510,11 +516,12 @@ def _check_outputs(keep, pip, G, lfsr, diag):
 
 
 def test_end_to_end_outputs_are_well_formed():
-    _check_outputs(*_run_pipeline(truncated_series=False))
+    _check_outputs(*_run_pipeline(truncated_series=False, save_diagnostics=True))
 
 
 def test_end_to_end_outputs_are_well_formed_with_truncated_series():
-    _check_outputs(*_run_pipeline(truncated_series=True))
+    # also covers the default, where no diagnostics file is written
+    _check_outputs(*_run_pipeline(truncated_series=True, save_diagnostics=False))
 
 
 SLOW = {"test_end_to_end_outputs_are_well_formed",

@@ -82,7 +82,8 @@ inexpensive to reproduce on a CPU; the run above takes roughly 15 minutes on a
 usage: ibcd.py [-h] --data DATA --prior {sf,er} --output_dir OUTPUT_DIR
                [--alpha_er ALPHA_ER] [--num_warmup NUM_WARMUP]
                [--num_samples NUM_SAMPLES] [--num_chains NUM_CHAINS]
-               [--truncated_series] [--series_order SERIES_ORDER] [--epsilon EPSILON]
+               [--save_diagnostics] [--seed SEED] [--truncated_series]
+               [--series_order SERIES_ORDER] [--epsilon EPSILON]
 
 IBCD pipeline. 1) Load data.csv (Y_matrix + target) 2) Run 2SLS 3) Choose SF (scale-free) or ER
 (Erdős–Rényi) empirical prior 4) Fit empricial Bayesian spike-and-slab on matrix normal model 5) Output G
@@ -101,6 +102,10 @@ options:
                         Number of posterior samples per chain after warm-up. Default = 1000.
   --num_chains NUM_CHAINS
                         Number of parallel MCMC chains. Default = 3.
+  --save_diagnostics    Write diagnostics.json to the output directory: divergences, leapfrog steps, split
+                        R-hat, ESS, spectral-radius quantiles, rejected-draw counts, runtime and the run
+                        configuration. Off by default because R-hat and ESS are O(D^2) over the entries of G.
+  --seed SEED           PRNG seed for MCMC. Default = 42.
   --truncated_series    Compute R as a truncated path sum instead of inverting (I - G). The sum has no
                         pole and bounded gradients, but costs roughly an order of magnitude more per
                         gradient. Default is the inverse.

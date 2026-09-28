@@ -158,49 +158,53 @@ def main(args):
             "reached the region where the model is defined."
         )
 
-    diagnostics = posterior_diagnostics(posterior, rho, keep, extra_fields=extra,
-                                        seed=args.seed)
-    diagnostics["runtime_seconds"] = float(elapsed)
-    diagnostics["config"] = {
-        "data": args.data,
-        "prior": args.prior,
-        "seed": args.seed,
-        "num_warmup": args.num_warmup,
-        "num_samples": args.num_samples,
-        "num_chains": args.num_chains,
-        "truncated_series": bool(args.truncated_series),
-        "series_order": args.series_order if args.truncated_series else None,
-        "epsilon": args.epsilon,
-    }
-    with open(os.path.join(args.output_dir, "diagnostics.json"), "w") as fh:
-        json.dump(diagnostics, fh, indent=2)
+    # Diagnostics are optional: split R-hat and ESS are O(D^2) over the entries
+    # of G, which is the expensive part of this block at large D. Rejection of
+    # non-convergent draws above is not optional, since it changes the outputs.
+    if args.save_diagnostics:
+        diagnostics = posterior_diagnostics(posterior, rho, keep,
+                                            extra_fields=extra, seed=args.seed)
+        diagnostics["runtime_seconds"] = float(elapsed)
+        diagnostics["config"] = {
+            "data": args.data,
+            "prior": args.prior,
+            "seed": args.seed,
+            "num_warmup": args.num_warmup,
+            "num_samples": args.num_samples,
+            "num_chains": args.num_chains,
+            "truncated_series": bool(args.truncated_series),
+            "series_order": args.series_order if args.truncated_series else None,
+            "epsilon": args.epsilon,
+        }
+        with open(os.path.join(args.output_dir, "diagnostics.json"), "w") as fh:
+            json.dump(diagnostics, fh, indent=2)
 
-    dg = diagnostics
-    issues = []
-    if dg.get("r_hat", {}).get("max", 0.0) > 1.05:
-        issues.append(f"max r_hat {dg['r_hat']['max']:.3f} > 1.05")
-    if dg.get("divergences", {}).get("pct", 0.0) > 5.0:
-        issues.append(f"{dg['divergences']['pct']:.1f}% of transitions diverged")
-    if dg.get("ess", {}).get("n_nonpositive_raw", 0) > 0:
-        issues.append(
-            f"{dg['ess']['n_nonpositive_raw']} entries had a non-positive ESS estimate"
-        )
-    if issues:
-        warnings.warn(
-            "Sampler did not converge cleanly: " + "; ".join(issues)
-            + ". See diagnostics.json.",
-            RuntimeWarning,
-        )
+        dg = diagnostics
+        issues = []
+        if dg.get("r_hat", {}).get("max", 0.0) > 1.05:
+            issues.append(f"max r_hat {dg['r_hat']['max']:.3f} > 1.05")
+        if dg.get("divergences", {}).get("pct", 0.0) > 5.0:
+            issues.append(f"{dg['divergences']['pct']:.1f}% of transitions diverged")
+        if dg.get("ess", {}).get("n_nonpositive_raw", 0) > 0:
+            issues.append(
+                f"{dg['ess']['n_nonpositive_raw']} entries had a non-positive ESS estimate"
+            )
+        if issues:
+            warnings.warn(
+                "Sampler did not converge cleanly: " + "; ".join(issues)
+                + ". See diagnostics.json.",
+                RuntimeWarning,
+            )
 
-    print(
-        "5) Diagnostics: "
-        f"divergences {dg.get('divergences', {}).get('n', 'NA')}"
-        f" ({dg.get('divergences', {}).get('pct', float('nan')):.1f}%), "
-        f"max r_hat {dg.get('r_hat', {}).get('max', float('nan')):.4f}, "
-        f"min ESS {dg.get('ess', {}).get('min', float('nan')):.0f}, "
-        f"rho median {dg['spectral_radius']['median']:.3f} max {dg['spectral_radius']['max']:.3g}, "
-        f"{elapsed:.1f}s"
-    )
+        print(
+            "5) Diagnostics: "
+            f"divergences {dg.get('divergences', {}).get('n', 'NA')}"
+            f" ({dg.get('divergences', {}).get('pct', float('nan')):.1f}%), "
+            f"max r_hat {dg.get('r_hat', {}).get('max', float('nan')):.4f}, "
+            f"min ESS {dg.get('ess', {}).get('min', float('nan')):.0f}, "
+            f"rho median {dg['spectral_radius']['median']:.3f} max {dg['spectral_radius']['max']:.3g}, "
+            f"{elapsed:.1f}s"
+        )
 
     flat = flat[keep]
 
@@ -277,6 +281,17 @@ if __name__ == "__main__":
         type=int,
         default=3,
         help="Number of parallel MCMC chains. Default = 3.",
+    )
+
+    parser.add_argument(
+        "--save_diagnostics",
+        action="store_true",
+        help=(
+            "Write diagnostics.json to the output directory: divergences, "
+            "leapfrog steps, split R-hat, ESS, spectral-radius quantiles, "
+            "rejected-draw counts, runtime and the run configuration. Off by "
+            "default because R-hat and ESS are O(D^2) over the entries of G."
+        ),
     )
 
     parser.add_argument(
