@@ -82,6 +82,7 @@ inexpensive to reproduce on a CPU; the run above takes roughly 15 minutes on a
 usage: ibcd.py [-h] --data DATA --prior {sf,er} --output_dir OUTPUT_DIR
                [--alpha_er ALPHA_ER] [--num_warmup NUM_WARMUP]
                [--num_samples NUM_SAMPLES] [--num_chains NUM_CHAINS]
+               [--chain_method {parallel,sequential,vectorized}]
                [--save_diagnostics] [--seed SEED] [--truncated_series]
                [--series_order SERIES_ORDER] [--epsilon EPSILON]
 
@@ -102,6 +103,11 @@ options:
                         Number of posterior samples per chain after warm-up. Default = 1000.
   --num_chains NUM_CHAINS
                         Number of parallel MCMC chains. Default = 3.
+  --chain_method {parallel,sequential,vectorized}
+                        How to draw multiple chains. 'vectorized' maps them onto one device, which is the
+                        only form of within-process parallelism available when CUDA exposes a single device,
+                        and avoids the post-hoc stack that 'sequential' pays for. 'parallel' needs one
+                        visible device per chain and falls back to sequential otherwise. Default = vectorized.
   --save_diagnostics    Write diagnostics.json to the output directory: divergences, leapfrog steps, split
                         R-hat, ESS, spectral-radius quantiles, rejected-draw counts, runtime and the run
                         configuration. Off by default because R-hat and ESS are O(D^2) over the entries of G.

@@ -299,13 +299,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--chain_method",
         choices=["parallel", "sequential", "vectorized"],
-        default="parallel",
+        default="vectorized",
         help=(
-            "How to draw multiple chains. 'parallel' needs one device per "
-            "chain and silently falls back to sequential otherwise; "
-            "'vectorized' maps all chains onto one device, which is faster "
-            "than sequential but holds every chain's draws at once. "
-            "Default = parallel."
+            "How to draw multiple chains. 'vectorized' maps them onto one "
+            "device, which is the only form of within-process parallelism "
+            "available when CUDA exposes a single device, and avoids the "
+            "post-hoc stack that 'sequential' pays for. 'parallel' needs one "
+            "visible device per chain and falls back to sequential otherwise. "
+            "Default = vectorized."
         ),
     )
 

@@ -574,7 +574,7 @@ def _run_pipeline(truncated_series, save_diagnostics=True):
             data=str(path), prior="sf", output_dir=str(out),
             alpha_er=2.0,
             num_warmup=20, num_samples=40, num_chains=1, epsilon=0.05,
-            chain_method="parallel",
+            chain_method="vectorized",
             truncated_series=truncated_series, series_order=24, seed=42,
             save_diagnostics=save_diagnostics,
         ))
