@@ -98,8 +98,21 @@ def main(args):
         num_warmup=args.num_warmup,
         num_samples=args.num_samples,
         num_chains=args.num_chains,
+        chain_method=args.chain_method,
         progress_bar=True,
     )
+
+    if args.num_chains > 1 and args.chain_method == "parallel":
+        n_dev = jax.local_device_count()
+        if n_dev < args.num_chains:
+            warnings.warn(
+                f"chain_method='parallel' with {args.num_chains} chains but only "
+                f"{n_dev} visible device(s); numpyro will draw the chains "
+                "sequentially. Use --chain_method vectorized to share one "
+                "device, or run one chain per job with --num_chains 1 and a "
+                "distinct --seed.",
+                RuntimeWarning,
+            )
 
     t_start = time.perf_counter()
     mcmc.run(
@@ -281,6 +294,19 @@ if __name__ == "__main__":
         type=int,
         default=3,
         help="Number of parallel MCMC chains. Default = 3.",
+    )
+
+    parser.add_argument(
+        "--chain_method",
+        choices=["parallel", "sequential", "vectorized"],
+        default="parallel",
+        help=(
+            "How to draw multiple chains. 'parallel' needs one device per "
+            "chain and silently falls back to sequential otherwise; "
+            "'vectorized' maps all chains onto one device, which is faster "
+            "than sequential but holds every chain's draws at once. "
+            "Default = parallel."
+        ),
     )
 
     parser.add_argument(

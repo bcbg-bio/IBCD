@@ -454,6 +454,106 @@ def test_convergent_draws_threshold_is_the_spectral_radius():
 
 
 # --------------------------------------------------------------------------
+# combine_chains
+# --------------------------------------------------------------------------
+
+def _write_chain(path, draws, colnames=None):
+    """Lay out a directory the way a single-chain ibcd.py run does."""
+    path.mkdir(parents=True, exist_ok=True)
+    np.save(path / "G_draws.npy", draws.astype(np.float32))
+    if colnames is not None:
+        mean = draws.reshape(-1, draws.shape[-2], draws.shape[-1]).mean(axis=0)
+        pd.DataFrame(mean, columns=colnames, index=colnames).to_csv(path / "G.csv")
+    return path
+
+
+def _chain_of_dags(n_draws, D, seed):
+    return np.stack([_dag(D, seed=seed * 1000 + n) for n in range(n_draws)])[None]
+
+
+def _combine(chain_dirs, out, epsilon=0.05):
+    import argparse
+    import combine_chains
+    combine_chains.main(argparse.Namespace(
+        chain_dirs=[str(c) for c in chain_dirs], output_dir=str(out),
+        epsilon=epsilon, seed=42,
+    ))
+    return {n: pd.read_csv(out / f"{n}.csv", index_col=0)
+            for n in ("G", "pip", "lfsr")}, json.load((out / "diagnostics.json").open())
+
+
+def test_load_chains_stacks_and_recovers_names():
+    import combine_chains
+    D, N = 6, 4
+    names = [f"V{i+1}" for i in range(D)]
+    with tempfile.TemporaryDirectory() as tmp:
+        dirs = [_write_chain(Path(tmp) / f"chain{c}", _chain_of_dags(N, D, c), names)
+                for c in range(3)]
+        draws, colnames = combine_chains.load_chains([str(d) for d in dirs])
+    assert draws.shape == (3, N, D, D)
+    assert colnames == names
+
+
+def test_load_chains_rejects_inconsistent_or_missing_input():
+    import combine_chains
+    with tempfile.TemporaryDirectory() as tmp:
+        a = _write_chain(Path(tmp) / "a", _chain_of_dags(4, 6, 0))
+        b = _write_chain(Path(tmp) / "b", _chain_of_dags(4, 8, 1))   # different D
+        try:
+            combine_chains.load_chains([str(a), str(b)])
+        except ValueError as exc:
+            assert "disagree" in str(exc)
+        else:
+            raise AssertionError("mismatched shapes must raise")
+
+        try:
+            combine_chains.load_chains([str(a), str(Path(tmp) / "nope")])
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("a missing G_draws.npy must raise")
+
+
+def test_combine_chains_matches_concatenated_draws():
+    D, N = 6, 5
+    names = [f"V{i+1}" for i in range(D)]
+    with tempfile.TemporaryDirectory() as tmp:
+        chains = [_chain_of_dags(N, D, c) for c in range(3)]
+        dirs = [_write_chain(Path(tmp) / f"chain{c}", chains[c], names)
+                for c in range(3)]
+        out, diag = _combine(dirs, Path(tmp) / "combined")
+
+        flat = np.concatenate(chains, axis=0).reshape(-1, D, D).astype(np.float32)
+        assert np.allclose(out["G"].values, flat.mean(axis=0), atol=1e-6)
+        assert np.allclose(out["pip"].values, (np.abs(flat) > 0.05).mean(axis=0),
+                           atol=1e-6)
+        for df in out.values():
+            assert list(df.columns) == names and list(df.index) == names
+        assert diag["n_chains"] == 3 and diag["n_draws_per_chain"] == N
+        assert diag["nonconvergent"]["n"] == 0
+
+
+def test_combine_chains_excludes_nonconvergent_draws():
+    """A runaway chain must be dropped from the combined summaries."""
+    D, N = 6, 5
+    with tempfile.TemporaryDirectory() as tmp:
+        good = [_chain_of_dags(N, D, c) for c in range(2)]
+        bad = _chain_of_dags(N, D, 2).copy()
+        bad[:, :, 0, 1] = 2.0          # a 2-cycle of weight 2 gives rho = 2
+        bad[:, :, 1, 0] = 2.0
+        assert (np.abs(np.linalg.eigvals(bad[0])).max(axis=1) >= 1).all()
+        dirs = [_write_chain(Path(tmp) / f"chain{c}", ch)
+                for c, ch in enumerate(good + [bad])]
+        out, diag = _combine(dirs, Path(tmp) / "combined")
+
+        assert diag["nonconvergent"]["n"] == N
+        assert diag["nonconvergent"]["per_chain"] == [0, 0, N]
+        # the combined mean must use only the two healthy chains
+        kept = np.concatenate(good, axis=0).reshape(-1, D, D).astype(np.float32)
+        assert np.allclose(out["G"].values, kept.mean(axis=0), atol=1e-6)
+
+
+# --------------------------------------------------------------------------
 # End to end (slow)
 # --------------------------------------------------------------------------
 
@@ -474,6 +574,7 @@ def _run_pipeline(truncated_series, save_diagnostics=True):
             data=str(path), prior="sf", output_dir=str(out),
             alpha_er=2.0,
             num_warmup=20, num_samples=40, num_chains=1, epsilon=0.05,
+            chain_method="parallel",
             truncated_series=truncated_series, series_order=24, seed=42,
             save_diagnostics=save_diagnostics,
         ))
