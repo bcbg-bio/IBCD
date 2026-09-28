@@ -344,7 +344,12 @@ def solve_edge_weights_rowwise_directional(
         wx_param.value = sqrt_w * xnorm
         w1mx_param.value = sqrt_w * (1.0 - xnorm)
         target_sum_param.value = float(pi0_i[i]) * n
-        prob.solve(solver=cp.OSQP, warm_start=True, verbose=False)
+        try:
+            prob.solve(solver=cp.OSQP, warm_start=True, verbose=False)
+            if p0.value is None or pk.value is None:
+                raise cp.SolverError("OSQP returned no value")
+        except cp.SolverError:
+            prob.solve(solver=cp.ECOS, verbose=False)
 
         pi0_ij[i, idx] = p0.value
         pi_k_ij[i, idx] = pk.value
