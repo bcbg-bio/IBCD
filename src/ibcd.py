@@ -52,8 +52,17 @@ def main(args):
         # -------- Scale-free (SF) prior --------
         print("2) Using SF prior (Scale-Free)...")
         R = Rhat_df.values
-        pi0_i = scale_free_degree(R)
+        # theta = sum_j |R_hat_ij|^2 is in units of squared effect size, not
+        # degree, so equation 13 fixes the shape of the degree profile but not
+        # the overall sparsity. The EM of equation 12 supplies that level, the
+        # same one equation 18 gives the ER prior; theta then only decides how
+        # it is shared across rows.
+        w, se_hat = load_R_and_SE_hat(Rhat_path, SE_hat_path)
+        pi0_global, _, _ = empirical_bayes_em(w, se_hat, alpha_er=args.alpha_er)
+        pi0_i = scale_free_degree(R, pi0_global=float(pi0_global),
+                                  pi0_floor=args.pi0_floor)
 
+        print("Estimated global spike weight:", float(pi0_global))
         print("Estimated spike weight:", pi0_i)
         print("3) Running edge specific weights for SF...")
         pi0_ij, pi_k_ij = solve_edge_weights_rowwise(
@@ -166,12 +175,6 @@ def main(args):
             )
         else:
             print(message)
-    if not keep.any():
-        raise RuntimeError(
-            "Every posterior draw has spectral radius >= 1; the sampler never "
-            "reached the region where the model is defined."
-        )
-
     # Diagnostics are optional: split R-hat and ESS are O(D^2) over the entries
     # of G, which is the expensive part of this block at large D. Rejection of
     # non-convergent draws above is not optional, since it changes the outputs.
@@ -225,6 +228,15 @@ def main(args):
             f"{elapsed:.1f}s"
         )
 
+    # Written after the diagnostics above, so a run that never reached the
+    # region where the model is defined still leaves a diagnostics.json behind
+    # to explain why.
+    if not keep.any():
+        raise RuntimeError(
+            "Every posterior draw has spectral radius >= 1; the sampler never "
+            "reached the region where the model is defined."
+        )
+
     flat = flat[keep]
 
     posterior_mean = flat.mean(axis=0)
@@ -274,6 +286,14 @@ if __name__ == "__main__":
         help="Directory to save all outputs.",
     )
 
+    parser.add_argument(
+        "--pi0_floor",
+        type=float,
+        default=0.05,
+        help=("SF prior only: smallest per-node spike proportion, so no row is "
+              "left entirely unshrunk. The row budget is capped at "
+              "(1 - pi0_floor) * (D - 1) and the excess redistributed."),
+    )
     parser.add_argument(
         "--alpha_er",
         type=float,

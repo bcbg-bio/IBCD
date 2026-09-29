@@ -30,6 +30,7 @@ sys.path.insert(0, str(SRC))
 
 from model import convergent_draws, posterior_diagnostics  # noqa: E402
 from empirical_prior import (  # noqa: E402
+    _cap_and_redistribute,
     _project_to_budget,
     load_R_and_SE_hat,
     scale_free_degree,
@@ -326,6 +327,91 @@ def test_scale_free_degree_returns_valid_probabilities():
     assert pi0_i.min() >= 0.0 and pi0_i.max() <= 1.0
 
 
+def test_cap_and_redistribute_preserves_the_total():
+    b = np.array([10.0, 1.0, 1.0, 1.0])
+    out = _cap_and_redistribute(b, cap=5.0)
+    assert out.max() <= 5.0 + 1e-9
+    assert np.isclose(out.sum(), b.sum())
+
+
+def test_cap_and_redistribute_clips_when_the_total_cannot_fit():
+    b = np.array([10.0, 10.0])
+    out = _cap_and_redistribute(b, cap=3.0)
+    assert np.allclose(out, 3.0)
+
+
+def test_anchored_scale_free_degree_matches_the_eq_18_budget():
+    """The EM level sets the total slab mass; theta only shares it out."""
+    D = 12
+    _, R = _fixture(D)
+    pi0_global = 0.8
+    pi0_i = scale_free_degree(R, pi0_global=pi0_global)
+    budget = (1.0 - pi0_i) * (D - 1)
+    assert np.isclose(budget.sum(), (1.0 - pi0_global) * (D * D - D))
+    assert pi0_i.min() >= 0.0 and pi0_i.max() <= 1.0
+
+
+def test_anchored_scale_free_degree_leaves_every_row_shrunk():
+    """No row may be handed the whole row as budget, which is zero shrinkage."""
+    D = 12
+    _, R = _fixture(D)
+    floor = 0.05
+    pi0_i = scale_free_degree(R, pi0_global=0.1, pi0_floor=floor)
+    assert pi0_i.min() >= floor - 1e-9
+
+
+def test_anchored_scale_free_degree_is_not_hostage_to_the_largest_node():
+    """The defect being fixed: under the max-normalisation pi0_i = 1 - theta_i/m,
+    one dominant hub inflates m and drives every other node's budget toward
+    zero while taking the whole of its own row. Anchoring the total to the EM
+    level makes the other rows' budgets robust to that."""
+    D = 12
+    _, R = _fixture(D)
+    hub = R.copy()
+    hub[0, 1:] *= 50.0                      # one node with a huge out-strength
+
+    legacy, legacy_hub = scale_free_degree(R), scale_free_degree(hub)
+    anchored = scale_free_degree(R, pi0_global=0.9)
+    anchored_hub = scale_free_degree(hub, pi0_global=0.9)
+
+    def share_left_to_others(p):
+        b = (1.0 - p) * (D - 1)
+        return float(b[1:].sum() / b.sum())
+
+    # legacy: the hub is handed its whole row, with no shrinkage at all, and
+    # what is left for the other D-1 rows is a rounding error
+    assert legacy_hub[0] < 1e-12
+    assert share_left_to_others(legacy_hub) < 0.01
+    # anchored: the hub keeps the pi0_floor of shrinkage, and the other rows
+    # retain a usable share of a total that no longer depends on the hub
+    assert anchored_hub[0] >= 0.05 - 1e-9
+    assert share_left_to_others(anchored_hub) > 0.15
+    assert share_left_to_others(anchored_hub) > 10 * share_left_to_others(legacy_hub)
+    # the anchored total is the EM budget whether or not the hub is present
+    assert np.isclose(((1.0 - anchored_hub) * (D - 1)).sum(),
+                      ((1.0 - anchored) * (D - 1)).sum())
+
+
+def test_anchored_scale_free_degree_responds_to_the_em_level():
+    """Unlike the max-normalisation, which is invariant to R -> cR, the
+    anchored version tracks the estimated sparsity."""
+    D = 12
+    _, R = _fixture(D)
+    sparse = scale_free_degree(R, pi0_global=0.95)
+    dense = scale_free_degree(R, pi0_global=0.5)
+    assert sparse.mean() > dense.mean()
+
+
+def test_posterior_diagnostics_bounds_the_rhat_subsample():
+    rng = np.random.default_rng(0)
+    D, n_chains, n_draws = 8, 3, 40
+    g = rng.normal(0, 0.01, (n_chains, n_draws, D, D))
+    keep, rho = convergent_draws(g.reshape(-1, D, D))
+    out = posterior_diagnostics(g, rho, keep, seed=0, max_rhat_entries=17)
+    assert out["r_hat"]["n_entries_used"] == 17
+    assert out["r_hat"]["n_entries_total"] == D * D - D
+
+
 def test_scale_free_degree_is_all_spike_when_R_carries_no_signal():
     R = np.eye(5)
     assert np.allclose(scale_free_degree(R), np.ones(5))
@@ -594,7 +680,7 @@ def _run_pipeline(truncated_series, save_diagnostics=True):
         out = Path(tmp) / "out"
         ibcd.main(argparse.Namespace(
             data=str(path), prior="sf", output_dir=str(out),
-            alpha_er=2.0,
+            alpha_er=2.0, pi0_floor=0.05,
             num_warmup=20, num_samples=40, num_chains=1, epsilon=0.05,
             chain_method="vectorized",
             target_accept_prob=0.7, max_tree_depth=10,

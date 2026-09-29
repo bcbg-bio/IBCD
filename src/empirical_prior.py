@@ -179,24 +179,68 @@ def solve_spike_slab_diagonal_spike(
 
     return pi0_sol, pik_sol, val
 
-def scale_free_degree(R):
-    """Per-node spike proportions from the in- and out-strengths of R_hat.
+def _cap_and_redistribute(budget, cap, n_iter=100):
+    """Clip a budget vector at `cap`, spreading the excess over the rest.
 
-    Let A = |R_hat|^2 with a zero diagonal, theta_i = sum_j A_ij the
-    out-strength of node i and phi_j = sum_i A_ij the in-strength of node j.
-    The scale-free prior matches an edge-probability matrix P in [0, 1] to
-    those marginals after rescaling them so the largest becomes D - 1, the
-    most edges a node can have. Only the row means of P are used downstream,
-    and any P attaining the marginals has row sums theta_i * (D-1) / m with
-    m = max(max theta, max phi), so
+    Clipping alone would quietly lower the total, which is the quantity the
+    EM anchors. Redistributing proportionally preserves it, and is iterated
+    because moving mass onto the uncapped rows can push some of them over.
 
-        pi0_i = 1 - (sum_j P_ij) / (D - 1) = 1 - theta_i / m
+    Args:
+        budget (np.ndarray): Per-row slab budgets.
+        cap (float): Largest budget any single row may hold.
+        n_iter (int): Maximum redistribution passes.
 
-    which needs no solver. theta_i <= m by construction, so pi0_i is in
-    [0, 1] without clipping.
+    Returns:
+        np.ndarray: Budgets bounded by cap, with the total preserved where
+        the cap leaves room for it.
+    """
+    b = np.asarray(budget, dtype=float).copy()
+    for _ in range(n_iter):
+        over = b > cap
+        if not over.any():
+            break
+        excess = float((b[over] - cap).sum())
+        b[over] = cap
+        free = ~over
+        free_mass = float(b[free].sum())
+        if not free.any() or free_mass <= 0:
+            break
+        b[free] += excess * b[free] / free_mass
+    return np.minimum(b, cap)
+
+
+def scale_free_degree(R, pi0_global=None, pi0_floor=0.05):
+    """Per-node spike proportions from the out-strengths of R_hat.
+
+    Let A = |R_hat|^2 with a zero diagonal and theta_i = sum_j A_ij the
+    out-strength of node i. Equation 13 matches the row sums of an edge
+    probability matrix P to theta, which is the Chung-Lu expected-degree
+    condition and only carries a sparsity level if theta is expressed as a
+    degree. It is not: theta is in units of squared effect size, so the
+    overall level it implies is arbitrary.
+
+    Normalising by m = max(theta.max(), phi.max()) supplies units but the
+    wrong ones. It forces the largest node to a budget of D - 1, which is a
+    completely unshrunk row, and because it is a pure ratio the implied mean
+    budget per row grows with D (about 7 at D = 50 and 31 at D = 500) while
+    the true degree stays near 5. It is also invariant to R_hat -> c R_hat,
+    so it cannot distinguish a dense graph from noise.
+
+    With `pi0_global` from the EM of equation 12 the level comes from the
+    data instead: the total slab budget is the one equation 18 gives the ER
+    prior, and theta only decides how it is shared out across rows. That is
+    the part theta estimates well; its correlation with the true out-degree
+    is about 0.97. `pi0_floor` bounds any single row's share so no row is
+    ever left entirely unshrunk.
 
     Args:
         R (np.ndarray): D x D matrix of estimated total causal effects.
+        pi0_global (float): Global spike proportion from `empirical_bayes_em`.
+            When None the legacy max-normalisation is used, which is kept only
+            so the published behaviour can be reproduced.
+        pi0_floor (float): Smallest per-node spike proportion, so each row
+            keeps at least this much shrinkage.
 
     Returns:
         np.ndarray: Length-D vector of per-node spike proportions.
@@ -206,12 +250,22 @@ def scale_free_degree(R):
     A = np.abs(R)**2
     np.fill_diagonal(A, 0)
     theta = A.sum(axis=1)
-    phi = A.sum(axis=0)
 
-    m = max(theta.max(), phi.max())
-    if m <= 0:
+    if pi0_global is None:
+        phi = A.sum(axis=0)
+        m = max(theta.max(), phi.max())
+        if m <= 0:
+            return np.ones(D)
+        return 1.0 - theta / m
+
+    total = float(theta.sum())
+    if total <= 0 or D < 2:
         return np.ones(D)
-    return 1.0 - theta / m
+
+    # Total slab mass from equation 18, shared out in proportion to theta.
+    budget = (1.0 - float(pi0_global)) * (D * D - D) * (theta / total)
+    budget = _cap_and_redistribute(budget, (1.0 - float(pi0_floor)) * (D - 1))
+    return np.clip(1.0 - budget / (D - 1), 0.0, 1.0)
 
 
 def solve_edge_weights_rowwise(xi, pi0_i):

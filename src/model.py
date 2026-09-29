@@ -95,7 +95,8 @@ def convergent_draws(G_draws, max_spectral_radius=1.0):
 
 
 def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
-                          max_ess_entries=5000, seed=0, max_tree_depth=12):
+                          max_ess_entries=5000, seed=0, max_tree_depth=12,
+                          max_rhat_entries=20000):
     """Summarise sampler behaviour and draw validity for one run.
 
     Convergence statistics are computed over the entries of G. ESS is
@@ -113,6 +114,9 @@ def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
         seed (int): Seed for choosing that subsample.
         max_tree_depth (int): The sampler's tree-depth limit, used to work out
             how many leapfrog steps a saturated iteration takes.
+        max_rhat_entries (int): Cap on how many entries of G enter the split
+            R-hat estimate. Bounds peak memory, which is what this costs at
+            large D; the estimate itself is cheap.
 
     Returns:
         dict: JSON-serialisable diagnostics.
@@ -148,17 +152,27 @@ def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
     kept = keep.reshape(n_chains, n_draws)
     usable = kept.all(axis=1)
     if usable.sum() >= 2:
-        sub = g[usable][:, :, offdiag]
+        # Index the entries before the chains: g[usable][:, :, offdiag] would
+        # materialise the whole off-diagonal block, which is 3 GB at D = 500 on
+        # top of the draws themselves. Subsampling first keeps it to a few
+        # hundred MB, and r_hat over a random subset of entries answers the
+        # same question as r_hat over all of them.
+        rng = np.random.default_rng(seed)
+        off_idx = np.flatnonzero(offdiag)
+        n_rhat = min(max_rhat_entries, off_idx.size)
+        r_idx = np.sort(rng.choice(off_idx, size=n_rhat, replace=False))
+        sub = g.reshape(n_chains, n_draws, D * D)[:, :, r_idx][usable]
         try:
             rhat = np.asarray(split_gelman_rubin(sub))
             out["r_hat"] = {
                 "max": float(np.nanmax(rhat)),
                 "median": float(np.nanmedian(rhat)),
                 "frac_above_1_01": float(np.nanmean(rhat > 1.01)),
+                "n_entries_used": int(n_rhat),
+                "n_entries_total": int(off_idx.size),
             }
         except Exception as exc:          # noqa: BLE001
             out["r_hat"] = {"error": str(exc)}
-        rng = np.random.default_rng(seed)
         idx = rng.choice(sub.shape[-1], size=min(max_ess_entries, sub.shape[-1]),
                          replace=False)
         try:
