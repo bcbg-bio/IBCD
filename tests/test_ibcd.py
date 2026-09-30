@@ -32,6 +32,7 @@ from model import (  # noqa: E402
     convergent_draws,
     gelfand_radius,
     matrix_model_spike_horseshoe,
+    optimized_init,
     posterior_diagnostics,
     power_iteration_radius,
     rho_log_penalty,
@@ -391,11 +392,18 @@ def test_power_iteration_radius_is_unreliable_on_a_complex_pair():
 
 
 def test_rho_barrier_is_zero_inside_and_grows_outside():
-    assert float(rho_log_penalty(0.5, "barrier")) == 0.0
-    assert float(rho_log_penalty(0.9, "barrier")) == 0.0
-    a = float(rho_log_penalty(1.0, "barrier")); b = float(rho_log_penalty(1.5, "barrier"))
+    kw = dict(start=0.9, width=0.05)
+    assert float(rho_log_penalty(0.5, "barrier", **kw)) == 0.0
+    assert float(rho_log_penalty(0.9, "barrier", **kw)) == 0.0
+    a = float(rho_log_penalty(1.0, "barrier", **kw)); b = float(rho_log_penalty(1.5, "barrier", **kw))
     assert a < 0.0 and b < a
     assert np.isclose(a, -((1.0 - 0.9) / 0.05) ** 2)
+
+
+def test_rho_barrier_defaults_are_the_soft_barrier():
+    """start 1.0, width 0.2: free up to rho = 1, one nat at rho = 1.2."""
+    assert float(rho_log_penalty(1.0, "barrier")) == 0.0
+    assert np.isclose(float(rho_log_penalty(1.2, "barrier")), -1.0)
 
 
 def test_rho_gaussian_is_the_appendix_h_prior():
@@ -423,6 +431,43 @@ def test_model_log_density_is_finite_under_each_rho_penalty():
         grads = jax.grad(info.potential_fn)(z)
         assert np.isfinite(pe), (pen, est)
         assert all(np.isfinite(np.asarray(v)).all() for v in grads.values()), (pen, est)
+
+
+def _small_model_kwargs(D=6, seed=3):
+    import jax.numpy as jnp
+    rng = np.random.default_rng(seed)
+    G = np.triu(rng.normal(0, 0.3, (D, D)) * (rng.random((D, D)) < 0.5), 1)
+    R = np.linalg.inv(np.eye(D) - G)
+    return dict(obs_data=R + rng.normal(0, 0.02, (D, D)), pi0_ij=np.full((D, D), 0.5),
+                U_lower=jnp.eye(D) * 0.05, V_lower=jnp.eye(D), D=D)
+
+
+def test_optimized_init_lowers_the_potential_and_gives_distinct_chains():
+    import jax
+    kw = _small_model_kwargs()
+    z, info = optimized_init(matrix_model_spike_horseshoe, kw, jax.random.PRNGKey(0),
+                             num_chains=3, steps=300, lr=1e-2, jitter=0.1)
+    for name in ("lam", "eps", "spike"):
+        assert z[name].shape == (3, 6, 6), name
+        assert np.isfinite(np.asarray(z[name])).all(), name
+    before, after = np.array(info["potential_before"]), np.array(info["potential_after"])
+    assert (after < before).all(), (before, after)
+    assert len(info["rho_start_per_chain"]) == 3
+    # the jitter keeps the chains from starting at one point
+    eps = np.asarray(z["eps"])
+    assert not np.allclose(eps[0], eps[1])
+
+
+def test_optimized_init_starts_are_accepted_by_nuts():
+    import jax
+    from numpyro.infer import MCMC, NUTS
+    kw = _small_model_kwargs()
+    z, _ = optimized_init(matrix_model_spike_horseshoe, kw, jax.random.PRNGKey(1),
+                          num_chains=2, steps=100)
+    m = MCMC(NUTS(matrix_model_spike_horseshoe, max_tree_depth=4), num_warmup=5,
+             num_samples=5, num_chains=2, chain_method="vectorized", progress_bar=False)
+    m.run(jax.random.PRNGKey(2), init_params=z, **kw)
+    assert np.isfinite(np.asarray(m.get_samples()["G"])).all()
 
 
 def test_cap_and_redistribute_preserves_the_total():
@@ -764,7 +809,7 @@ def test_combine_chains_excludes_nonconvergent_draws():
 # --------------------------------------------------------------------------
 
 def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
-                  rho_estimator="power"):
+                  rho_estimator="power", init_strategy="median"):
     """Run the real pipeline on a small subset of the shipped example data."""
     import argparse
     import ibcd
@@ -786,6 +831,9 @@ def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
             truncated_series=truncated_series, series_order=24, seed=42,
             save_diagnostics=save_diagnostics,
             rho_penalty=rho_penalty, rho_estimator=rho_estimator, rho_sigma=0.5,
+            rho_barrier_start=1.0, rho_barrier_width=0.2,
+            init_strategy=init_strategy, init_opt_steps=200, init_opt_lr=0.01,
+            init_jitter=0.1,
         ))
 
         pip = pd.read_csv(out / "pip.csv", index_col=0)
@@ -849,7 +897,20 @@ def test_end_to_end_outputs_are_well_formed_with_a_rho_penalty():
     assert diag["rho_estimate"]["median_ratio_to_exact"] > 0.9
 
 
-SLOW = {"test_end_to_end_outputs_are_well_formed",
+def test_end_to_end_outputs_are_well_formed_with_an_optimized_start():
+    keep, pip, G, lfsr, diag = _run_pipeline(
+        truncated_series=False, save_diagnostics=True,
+        rho_penalty="barrier", rho_estimator="gelfand", init_strategy="optimized")
+    _check_outputs(keep, pip, G, lfsr, diag)
+    assert diag["config"]["init_strategy"] == "optimized"
+    assert diag["config"]["rho_barrier_start"] == 1.0
+    assert len(diag["init"]["rho_start_per_chain"]) == diag["n_chains"]
+    assert all(a < b for a, b in zip(diag["init"]["potential_after"],
+                                     diag["init"]["potential_before"]))
+
+
+SLOW = {"test_end_to_end_outputs_are_well_formed_with_an_optimized_start",
+        "test_end_to_end_outputs_are_well_formed",
         "test_end_to_end_outputs_are_well_formed_with_truncated_series",
         "test_end_to_end_outputs_are_well_formed_with_a_rho_penalty"}
 

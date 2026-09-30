@@ -18,7 +18,7 @@ from empirical_prior import (
     solve_spike_slab_diagonal_spike,
 )
 from model import (matrix_model_spike_horseshoe, compute_lfsr, convergent_draws,
-                   posterior_diagnostics)
+                   posterior_diagnostics, optimized_init)
 from iv_regression import xi_norm, run_all_IV
 
 
@@ -123,9 +123,8 @@ def main(args):
                 RuntimeWarning,
             )
 
-    t_start = time.perf_counter()
-    mcmc.run(
-        jax.random.PRNGKey(args.seed),
+    # one set of model arguments, shared by the optimised start and the sampler
+    model_kwargs = dict(
         obs_data=Rhat_df.values,
         pi0_ij=pi0_ij,
         U_lower=U_lower,
@@ -136,8 +135,33 @@ def main(args):
         rho_penalty=None if args.rho_penalty == "none" else args.rho_penalty,
         rho_estimator=args.rho_estimator,
         rho_sigma=args.rho_sigma,
+        rho_barrier_start=args.rho_barrier_start,
+        rho_barrier_width=args.rho_barrier_width,
+    )
+
+    init_params, init_info = None, None
+    if args.init_strategy == "optimized":
+        print(f"4a) Optimising starting values ({args.init_opt_steps} Adam steps)...")
+        t_init = time.perf_counter()
+        init_params, init_info = optimized_init(
+            matrix_model_spike_horseshoe, model_kwargs,
+            jax.random.fold_in(jax.random.PRNGKey(args.seed), 1),
+            num_chains=args.num_chains, steps=args.init_opt_steps,
+            lr=args.init_opt_lr, jitter=args.init_jitter,
+        )
+        if args.num_chains == 1:
+            init_params = jax.tree_util.tree_map(lambda x: x[0], init_params)
+        init_info["seconds"] = time.perf_counter() - t_init
+        print("    rho(G) at the start of each chain:",
+              [round(r, 3) for r in init_info["rho_start_per_chain"]])
+
+    t_start = time.perf_counter()
+    mcmc.run(
+        jax.random.PRNGKey(args.seed),
+        init_params=init_params,
         extra_fields=("num_steps", "diverging", "accept_prob",
                       "adapt_state.step_size"),
+        **model_kwargs,
     )
 
 
@@ -201,7 +225,15 @@ def main(args):
             "rho_penalty": args.rho_penalty,
             "rho_estimator": args.rho_estimator if args.rho_penalty != "none" else None,
             "rho_sigma": args.rho_sigma if args.rho_penalty == "gaussian" else None,
+            "rho_barrier_start": args.rho_barrier_start if args.rho_penalty == "barrier" else None,
+            "rho_barrier_width": args.rho_barrier_width if args.rho_penalty == "barrier" else None,
+            "init_strategy": args.init_strategy,
+            "init_opt_steps": args.init_opt_steps if args.init_strategy == "optimized" else None,
+            "init_opt_lr": args.init_opt_lr if args.init_strategy == "optimized" else None,
+            "init_jitter": args.init_jitter if args.init_strategy == "optimized" else None,
         }
+        if init_info is not None:
+            diagnostics["init"] = init_info
         if args.rho_penalty != "none":
             # what the penalty acted on, against the exact rho recorded above
             est = np.asarray(jax.device_get(mcmc.get_samples()["rho_estimate"])).ravel()
@@ -419,7 +451,8 @@ if __name__ == "__main__":
         help=(
             "Constraint on the spectral radius of G. 'gaussian' is the "
             "Appendix H prior N(0, rho_sigma^2) on rho; 'barrier' is zero "
-            "below rho = 0.9 and rises steeply above it. Default none."
+            "below --rho_barrier_start and rises as ((rho - start)/width)^2 "
+            "above it. Default none."
         ),
     )
 
@@ -439,6 +472,56 @@ if __name__ == "__main__":
         type=float,
         default=0.5,
         help="Scale of the Gaussian rho penalty. Default 0.5, as on main.",
+    )
+
+    parser.add_argument(
+        "--rho_barrier_start",
+        type=float,
+        default=1.0,
+        help="Spectral radius where the barrier begins. Default 1.0.",
+    )
+
+    parser.add_argument(
+        "--rho_barrier_width",
+        type=float,
+        default=0.2,
+        help=("Distance past --rho_barrier_start over which the barrier costs "
+              "1 nat; smaller is steeper. Default 0.2."),
+    )
+
+    parser.add_argument(
+        "--init_strategy",
+        choices=["median", "optimized"],
+        default="median",
+        help=(
+            "Where NUTS starts. 'median' is init_to_median(num_samples=50), an "
+            "essentially empty G. 'optimized' starts there and takes "
+            "--init_opt_steps Adam steps on the log posterior first; the "
+            "posterior is unchanged. Default median."
+        ),
+    )
+
+    parser.add_argument(
+        "--init_opt_steps",
+        type=int,
+        default=2000,
+        help="Adam steps for --init_strategy optimized. Default 2000.",
+    )
+
+    parser.add_argument(
+        "--init_opt_lr",
+        type=float,
+        default=0.01,
+        help=("Adam learning rate for --init_strategy optimized. Larger values "
+              "can overshoot rho = 1 on the way down. Default 0.01."),
+    )
+
+    parser.add_argument(
+        "--init_jitter",
+        type=float,
+        default=0.1,
+        help=("Noise added to log(lam) and eps after optimising, so the "
+              "chains do not start at one point. Default 0.1."),
     )
 
     parser.add_argument(

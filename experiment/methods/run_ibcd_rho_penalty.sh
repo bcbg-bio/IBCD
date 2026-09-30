@@ -4,7 +4,8 @@
 #   appH             Appendix H as written: Gaussian prior N(0, 0.5^2) on rho,
 #                    rho from 50 steps of power iteration (port of 42660bd)
 #   gelfand_gauss    the same Gaussian prior, rho from the Gelfand upper bound
-#   gelfand_barrier  a barrier that is zero below rho = 0.9, Gelfand bound
+#   gelfand_barrier  a barrier that is zero below rho = 0.9 (width 0.05), Gelfand
+#                    bound. Pinned explicitly: the defaults became the softer 1.0 / 0.2.
 #
 # 3 arms x 2 graph families x 5 seeds = 30 array elements. SF comes first
 # (1-15), since it is the family that fails without a constraint; ER (16-30)
@@ -47,7 +48,8 @@ GRAPH=${GRAPHS[$(( i / 15 ))]}
 case "$ARM" in
     appH)            ARM_FLAGS=(--rho_penalty gaussian --rho_estimator power) ;;
     gelfand_gauss)   ARM_FLAGS=(--rho_penalty gaussian --rho_estimator gelfand) ;;
-    gelfand_barrier) ARM_FLAGS=(--rho_penalty barrier  --rho_estimator gelfand) ;;
+    gelfand_barrier) ARM_FLAGS=(--rho_penalty barrier  --rho_estimator gelfand \
+                                --rho_barrier_start 0.9 --rho_barrier_width 0.05) ;;
     *)               echo "unknown arm '$ARM'" >&2; exit 1 ;;
 esac
 

@@ -41,15 +41,19 @@ def gelfand_radius(G, n_squarings=6):
     return jnp.exp(log_r)
 
 
-def rho_log_penalty(rho, kind, sigma=0.5, start=0.9, width=0.05):
+def rho_log_penalty(rho, kind, sigma=0.5, start=1.0, width=0.2):
     """Log-density term that discourages a large spectral radius.
 
     'gaussian' is the Appendix H prior, log N(rho; 0, sigma^2). It acts at
     every rho, so it also shrinks cycles well inside rho < 1. 'barrier' is
     exactly zero below `start` and grows as ((rho - start) / width)^2 above
-    it, so it leaves the interior alone and enforces the rho < 1 that the
-    path-sum definition of R requires. The hinge is squared so the gradient
+    it, so it leaves the interior alone. The hinge is squared so the gradient
     stays continuous, which NUTS needs.
+
+    The defaults (start 1.0, width 0.2) are deliberately soft. At D = 150 a
+    steeper barrier (0.9, 0.05) left chains that met it early in warmup with
+    a collapsed step size, frozen wherever they were; the softer one lets a
+    draw sit slightly past rho = 1 rather than pinning it there.
     """
     if kind == "gaussian":
         return dist.Normal(0.0, sigma).log_prob(rho)
@@ -58,10 +62,85 @@ def rho_log_penalty(rho, kind, sigma=0.5, start=0.9, width=0.05):
     raise ValueError(f"unknown rho penalty '{kind}'")
 
 
+def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2,
+                   jitter=0.1):
+    """Starting points for NUTS from a short optimisation of the log posterior.
+
+    From the default start, init_to_median, G is essentially empty and far from
+    R_hat, so the likelihood gradient is steep. At D = 150 on SF graphs every
+    chain started there left rho(G) < 1 within the first 20 warmup iterations
+    and never came back, while chains started at the true G stayed at
+    rho ~ 0.7. Descending the same potential from the same start in many small
+    Adam steps reaches rho ~ 0.6 on every seed tested. The posterior is
+    unchanged; only where the sampler begins is.
+
+    Uses numpyro.optim.Adam, a wrapper over jax.example_libraries.optimizers,
+    so it adds no dependency. Adam moves each coordinate by about lr per step
+    whatever the size of its gradient, which is what keeps the descent from
+    overshooting the way an untuned leapfrog step does.
+
+    Each chain starts from its own init_to_median draw and is optimised
+    separately. The chains end up close together, which would leave split
+    R-hat little to compare, so `jitter` (in unconstrained units) is added to
+    log(lam) and eps afterwards. The spike is left as optimised, since its
+    prior scale is sigma0 = 1e-3.
+
+    Args:
+        model: The numpyro model.
+        model_kwargs (dict): Keyword arguments for the model.
+        rng_key: PRNG key.
+        num_chains (int): Number of starting points.
+        steps (int): Adam steps.
+        lr (float): Adam learning rate.
+        jitter (float): Standard deviation of the noise added afterwards.
+
+    Returns:
+        z (dict): Unconstrained starting values with a leading chain axis,
+            ready for MCMC.run(init_params=...).
+        info (dict): Potential energy before and after, and rho(G) at the
+            start of each chain.
+    """
+    import jax
+    from numpyro import infer
+    from numpyro.infer.util import initialize_model
+    from numpyro.optim import Adam
+
+    k_init, k_jit = jax.random.split(rng_key)
+    mi = initialize_model(jax.random.split(k_init, num_chains), model,
+                          model_kwargs=model_kwargs,
+                          init_strategy=infer.init_to_median(num_samples=50))
+    potential = mi.potential_fn
+    grad = jax.grad(potential)
+    opt = Adam(lr)
+
+    def optimise(z0):
+        def step(state, _):
+            return opt.update(grad(opt.get_params(state)), state), None
+        state, _ = jax.lax.scan(step, opt.init(z0), None, length=steps)
+        z = opt.get_params(state)
+        return z, potential(z0), potential(z)
+
+    z, pe_start, pe_end = jax.jit(jax.vmap(optimise))(mi.param_info.z)
+
+    keys = jax.random.split(k_jit, 2)
+    for key, name in zip(keys, ("lam", "eps")):
+        if name in z:
+            z[name] = z[name] + jitter * jax.random.normal(key, z[name].shape)
+
+    G = np.asarray(jax.vmap(mi.postprocess_fn)(z)["G"], dtype=np.float64)
+    rho = np.abs(np.linalg.eigvals(G)).max(axis=1)
+    info = {
+        "potential_before": [float(x) for x in np.asarray(pe_start)],
+        "potential_after": [float(x) for x in np.asarray(pe_end)],
+        "rho_start_per_chain": [float(x) for x in rho],
+    }
+    return z, info
+
+
 def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0.001, tau=0.1,
                                  epsilon=1e-5, truncated_series=False, series_order=24,
                                  rho_penalty=None, rho_estimator="power", rho_sigma=0.5,
-                                 rho_barrier_start=0.9, rho_barrier_width=0.05):
+                                 rho_barrier_start=1.0, rho_barrier_width=0.2):
     """
     NumPyro model: Spike-and-horseshoe prior over matrix G, MatrixNormal likelihood.
 
