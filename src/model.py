@@ -5,8 +5,63 @@ import jax.numpy as jnp
 import arviz as az
 import numpy as np
 
+def power_iteration_radius(G, max_iter=50):
+    """Spectral radius estimate by power iteration, as in the Appendix H penalty.
+
+    A line-for-line port of `spectral_radius` in commit 42660bd on main, kept
+    unchanged so the published penalty can be tested as written. It estimates
+    |lambda_max| rather than bounding it, and when the dominant eigenvalues
+    are a complex-conjugate pair the iterate rotates instead of converging.
+    """
+    v = jnp.ones(G.shape[0])
+    for _ in range(max_iter):
+        v = G @ v
+        v = v / (jnp.linalg.norm(v) + 1e-8)
+    return jnp.linalg.norm(G @ v)
+
+
+def gelfand_radius(G, n_squarings=6):
+    """Upper bound on the spectral radius from Gelfand's formula.
+
+    rho(G) <= ||G^k||_F^(1/k), tightening as k grows; k = 2^n_squarings. G^k
+    is formed by repeated squaring, renormalising at every step and summing
+    the logs, so it neither overflows at large rho nor underflows for a
+    near-nilpotent G. Uses only matmuls, so it runs on GPU and has a smooth
+    gradient, unlike an eigendecomposition of a nonsymmetric matrix.
+    """
+    tiny = 1e-30
+    A = G
+    log_r = 0.0
+    for i in range(n_squarings):
+        s = jnp.sqrt(jnp.sum(A * A) + tiny)
+        log_r = log_r + jnp.log(s) * 2.0 ** (-i)
+        A = A / s
+        A = A @ A
+    log_r = log_r + jnp.log(jnp.sqrt(jnp.sum(A * A) + tiny)) * 2.0 ** (-n_squarings)
+    return jnp.exp(log_r)
+
+
+def rho_log_penalty(rho, kind, sigma=0.5, start=0.9, width=0.05):
+    """Log-density term that discourages a large spectral radius.
+
+    'gaussian' is the Appendix H prior, log N(rho; 0, sigma^2). It acts at
+    every rho, so it also shrinks cycles well inside rho < 1. 'barrier' is
+    exactly zero below `start` and grows as ((rho - start) / width)^2 above
+    it, so it leaves the interior alone and enforces the rho < 1 that the
+    path-sum definition of R requires. The hinge is squared so the gradient
+    stays continuous, which NUTS needs.
+    """
+    if kind == "gaussian":
+        return dist.Normal(0.0, sigma).log_prob(rho)
+    if kind == "barrier":
+        return -jnp.square(jnp.maximum(rho - start, 0.0) / width)
+    raise ValueError(f"unknown rho penalty '{kind}'")
+
+
 def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0.001, tau=0.1,
-                                 epsilon=1e-5, truncated_series=False, series_order=24):
+                                 epsilon=1e-5, truncated_series=False, series_order=24,
+                                 rho_penalty=None, rho_estimator="power", rho_sigma=0.5,
+                                 rho_barrier_start=0.9, rho_barrier_width=0.05):
     """
     NumPyro model: Spike-and-horseshoe prior over matrix G, MatrixNormal likelihood.
 
@@ -27,6 +82,14 @@ def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0
             series_order reaches the longest directed path.
         series_order (int): Highest power retained in the truncated path sum.
             Ignored unless truncated_series is set.
+        rho_penalty (str): None for no constraint on rho(G), 'gaussian' for
+            the Appendix H prior N(0, rho_sigma^2), or 'barrier' for a term
+            that is zero below rho_barrier_start. See `rho_log_penalty`.
+        rho_estimator (str): 'power' (Appendix H's power iteration) or
+            'gelfand' (an upper bound). Ignored unless rho_penalty is set.
+        rho_sigma (float): Scale of the Gaussian penalty; 0.5 as on main.
+        rho_barrier_start (float): Spectral radius where the barrier begins.
+        rho_barrier_width (float): Distance over which the barrier costs 1 nat.
     """
 
     # Sample horseshoe local scales (HalfCauchy), shape (D, D)
@@ -48,6 +111,21 @@ def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0
     G = pi0_ij * spike_vals + (1. - pi0_ij) * slab_vals
     G = G * (1. - jnp.eye(D))
     numpyro.deterministic("G", G)           # keep only G
+
+    if rho_penalty:
+        if rho_estimator == "power":
+            rho_est = power_iteration_radius(G)
+        elif rho_estimator == "gelfand":
+            rho_est = gelfand_radius(G)
+        else:
+            raise ValueError(f"unknown rho estimator '{rho_estimator}'")
+        # recorded so each run can compare the estimate the penalty acted on
+        # with the exact spectral radius computed afterwards
+        numpyro.deterministic("rho_estimate", rho_est)
+        numpyro.factor("spectral_radius_penalty",
+                       rho_log_penalty(rho_est, rho_penalty, sigma=rho_sigma,
+                                       start=rho_barrier_start,
+                                       width=rho_barrier_width))
 
     # MatrixNormal mean. R is the sum over directed paths, sum_d G^d, which
     # equals (I - G)^-1 for a DAG. Accumulating the truncated sum by Horner

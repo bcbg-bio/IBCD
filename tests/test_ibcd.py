@@ -28,7 +28,14 @@ REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src"
 sys.path.insert(0, str(SRC))
 
-from model import convergent_draws, posterior_diagnostics  # noqa: E402
+from model import (  # noqa: E402
+    convergent_draws,
+    gelfand_radius,
+    matrix_model_spike_horseshoe,
+    posterior_diagnostics,
+    power_iteration_radius,
+    rho_log_penalty,
+)
 from empirical_prior import (  # noqa: E402
     _cap_and_redistribute,
     _project_to_budget,
@@ -325,6 +332,97 @@ def test_scale_free_degree_returns_valid_probabilities():
     pi0_i = scale_free_degree(R)
     assert pi0_i.shape == (D,)
     assert pi0_i.min() >= 0.0 and pi0_i.max() <= 1.0
+
+
+def _exact_rho(G):
+    return float(np.abs(np.linalg.eigvals(np.asarray(G, dtype=np.float64))).max())
+
+
+def test_gelfand_radius_bounds_and_tracks_the_spectral_radius():
+    rng = np.random.default_rng(0)
+    for scale in (0.02, 0.1, 1.0, 50.0):                  # healthy through runaway
+        G = rng.normal(0, scale, (30, 30))
+        exact = _exact_rho(G)
+        est = float(gelfand_radius(G))
+        assert est >= exact * (1 - 1e-4), (scale, est, exact)
+        assert est <= exact * 1.15, (scale, est, exact)
+
+
+def test_gelfand_radius_vanishes_on_a_dag_with_a_finite_gradient():
+    import jax
+    rng = np.random.default_rng(1)
+    G = np.triu(rng.normal(0, 0.3, (20, 20)), 1)          # nilpotent: rho = 0
+    # the log-space floor leaves a small residue instead of exactly zero, but
+    # the gradient must stay finite there
+    assert float(gelfand_radius(G)) < 0.1
+    g = np.asarray(jax.grad(lambda x: gelfand_radius(x))(G))
+    assert np.isfinite(g).all()
+    # sampled G are never exactly nilpotent: the spike noise alone lifts rho
+    # well above zero through non-normal amplification, and the bound follows
+    Gn = G + rng.normal(0, 1e-3, G.shape); np.fill_diagonal(Gn, 0.0)
+    exact = _exact_rho(Gn)
+    assert exact > 0.1
+    assert exact * (1 - 1e-4) <= float(gelfand_radius(Gn)) <= exact * 1.15
+
+
+def test_power_iteration_radius_matches_main():
+    """Port of spectral_radius from 42660bd: right when the dominant
+    eigenvalue is real and well separated."""
+    rng = np.random.default_rng(2)
+    Q = np.linalg.qr(rng.normal(size=(12, 12)))[0]
+    G = Q @ np.diag(np.r_[0.8, np.linspace(0.3, 0.05, 11)]) @ Q.T
+    assert abs(float(power_iteration_radius(G)) - 0.8) < 1e-3
+
+
+def test_power_iteration_radius_is_unreliable_on_a_complex_pair():
+    """Why it is tested against the Gelfand bound: when the leading
+    eigenvalues are a complex-conjugate pair the iterate rotates, so the
+    estimate need not approach rho."""
+    th = 2.0
+    blk = 5.0 * np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
+    G = np.zeros((6, 6)); G[:2, :2] = blk; G[:2, :2] += np.array([[0.0, -20.0], [0.0, 0.0]])   # non-normal, still complex
+    G[2:, 2:] = np.diag([0.4, 0.3, 0.2, 0.1])
+    ev = np.linalg.eigvals(G)
+    assert abs(ev[np.argmax(np.abs(ev))].imag) > 1.0      # the premise of the test
+    exact = _exact_rho(G)
+    est = float(power_iteration_radius(G))
+    assert abs(est / exact - 1.0) > 0.1, (est, exact)
+    assert float(gelfand_radius(G)) >= exact * (1 - 1e-4)
+
+
+def test_rho_barrier_is_zero_inside_and_grows_outside():
+    assert float(rho_log_penalty(0.5, "barrier")) == 0.0
+    assert float(rho_log_penalty(0.9, "barrier")) == 0.0
+    a = float(rho_log_penalty(1.0, "barrier")); b = float(rho_log_penalty(1.5, "barrier"))
+    assert a < 0.0 and b < a
+    assert np.isclose(a, -((1.0 - 0.9) / 0.05) ** 2)
+
+
+def test_rho_gaussian_is_the_appendix_h_prior():
+    from scipy import stats
+    for r in (0.0, 0.5, 2.0):
+        assert np.isclose(float(rho_log_penalty(r, "gaussian", sigma=0.5)),
+                          stats.norm(0, 0.5).logpdf(r))
+
+
+def test_model_log_density_is_finite_under_each_rho_penalty():
+    import jax
+    import jax.numpy as jnp
+    from numpyro.infer.util import initialize_model
+    D = 6
+    rng = np.random.default_rng(3)
+    kw = dict(obs_data=np.eye(D) + rng.normal(0, 0.05, (D, D)),
+              pi0_ij=np.full((D, D), 0.8), U_lower=jnp.eye(D) * 0.1,
+              V_lower=jnp.eye(D), D=D)
+    for pen, est in [(None, "power"), ("gaussian", "power"),
+                     ("gaussian", "gelfand"), ("barrier", "gelfand")]:
+        info = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe,
+                                model_kwargs=dict(kw, rho_penalty=pen, rho_estimator=est))
+        z = info.param_info.z
+        pe = float(info.potential_fn(z))
+        grads = jax.grad(info.potential_fn)(z)
+        assert np.isfinite(pe), (pen, est)
+        assert all(np.isfinite(np.asarray(v)).all() for v in grads.values()), (pen, est)
 
 
 def test_cap_and_redistribute_preserves_the_total():
@@ -665,7 +763,8 @@ def test_combine_chains_excludes_nonconvergent_draws():
 # End to end (slow)
 # --------------------------------------------------------------------------
 
-def _run_pipeline(truncated_series, save_diagnostics=True):
+def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
+                  rho_estimator="power"):
     """Run the real pipeline on a small subset of the shipped example data."""
     import argparse
     import ibcd
@@ -686,6 +785,7 @@ def _run_pipeline(truncated_series, save_diagnostics=True):
             target_accept_prob=0.7, max_tree_depth=10,
             truncated_series=truncated_series, series_order=24, seed=42,
             save_diagnostics=save_diagnostics,
+            rho_penalty=rho_penalty, rho_estimator=rho_estimator, rho_sigma=0.5,
         ))
 
         pip = pd.read_csv(out / "pip.csv", index_col=0)
@@ -737,8 +837,21 @@ def test_end_to_end_outputs_are_well_formed_with_truncated_series():
     _check_outputs(*_run_pipeline(truncated_series=True, save_diagnostics=False))
 
 
+def test_end_to_end_outputs_are_well_formed_with_a_rho_penalty():
+    keep, pip, G, lfsr, diag = _run_pipeline(
+        truncated_series=False, save_diagnostics=True,
+        rho_penalty="barrier", rho_estimator="gelfand")
+    _check_outputs(keep, pip, G, lfsr, diag)
+    assert diag["config"]["rho_penalty"] == "barrier"
+    assert diag["config"]["rho_estimator"] == "gelfand"
+    assert diag["rho_estimate"]["median"] >= 0.0
+    # gelfand is an upper bound, so it should not sit far below the exact rho
+    assert diag["rho_estimate"]["median_ratio_to_exact"] > 0.9
+
+
 SLOW = {"test_end_to_end_outputs_are_well_formed",
-        "test_end_to_end_outputs_are_well_formed_with_truncated_series"}
+        "test_end_to_end_outputs_are_well_formed_with_truncated_series",
+        "test_end_to_end_outputs_are_well_formed_with_a_rho_penalty"}
 
 
 def _main():

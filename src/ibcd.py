@@ -133,6 +133,9 @@ def main(args):
         D=D,
         truncated_series=args.truncated_series,
         series_order=args.series_order,
+        rho_penalty=None if args.rho_penalty == "none" else args.rho_penalty,
+        rho_estimator=args.rho_estimator,
+        rho_sigma=args.rho_sigma,
         extra_fields=("num_steps", "diverging", "accept_prob",
                       "adapt_state.step_size"),
     )
@@ -195,7 +198,20 @@ def main(args):
             "truncated_series": bool(args.truncated_series),
             "series_order": args.series_order if args.truncated_series else None,
             "epsilon": args.epsilon,
+            "rho_penalty": args.rho_penalty,
+            "rho_estimator": args.rho_estimator if args.rho_penalty != "none" else None,
+            "rho_sigma": args.rho_sigma if args.rho_penalty == "gaussian" else None,
         }
+        if args.rho_penalty != "none":
+            # what the penalty acted on, against the exact rho recorded above
+            est = np.asarray(jax.device_get(mcmc.get_samples()["rho_estimate"])).ravel()
+            diagnostics["rho_estimate"] = {
+                k: float(v) for k, v in zip(
+                    ["min", "median", "p95", "max"],
+                    np.percentile(est, [0, 50, 95, 100]))
+            }
+            diagnostics["rho_estimate"]["median_ratio_to_exact"] = float(
+                np.median(est / np.maximum(rho, 1e-12)))
         with open(os.path.join(args.output_dir, "diagnostics.json"), "w") as fh:
             json.dump(diagnostics, fh, indent=2)
 
@@ -394,6 +410,35 @@ if __name__ == "__main__":
             "R = sum_d G^d. Exact once it reaches the longest directed path "
             "in the graph. Only used with --truncated_series. Default = 24."
         ),
+    )
+
+    parser.add_argument(
+        "--rho_penalty",
+        choices=["none", "gaussian", "barrier"],
+        default="none",
+        help=(
+            "Constraint on the spectral radius of G. 'gaussian' is the "
+            "Appendix H prior N(0, rho_sigma^2) on rho; 'barrier' is zero "
+            "below rho = 0.9 and rises steeply above it. Default none."
+        ),
+    )
+
+    parser.add_argument(
+        "--rho_estimator",
+        choices=["power", "gelfand"],
+        default="power",
+        help=(
+            "How rho is computed for --rho_penalty: 'power' is the Appendix H "
+            "power iteration (50 steps), 'gelfand' an upper bound from "
+            "||G^64||^(1/64). Default power."
+        ),
+    )
+
+    parser.add_argument(
+        "--rho_sigma",
+        type=float,
+        default=0.5,
+        help="Scale of the Gaussian rho penalty. Default 0.5, as on main.",
     )
 
     parser.add_argument(
