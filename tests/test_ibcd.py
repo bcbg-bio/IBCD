@@ -31,10 +31,12 @@ sys.path.insert(0, str(SRC))
 from model import (  # noqa: E402
     convergent_draws,
     gelfand_radius,
+    latents_from_G,
     matrix_model_spike_horseshoe,
     optimized_init,
     posterior_diagnostics,
     power_iteration_radius,
+    rhat_start,
     rho_log_penalty,
 )
 from empirical_prior import (  # noqa: E402
@@ -470,6 +472,69 @@ def test_optimized_init_starts_are_accepted_by_nuts():
     assert np.isfinite(np.asarray(m.get_samples()["G"])).all()
 
 
+def test_rhat_start_soft_thresholds_at_k_standard_errors():
+    R = np.array([[1.0, 0.5, -0.05], [0.02, 1.0, -0.4], [0.0, 0.1, 1.0]])
+    S = np.array([[0.0, 0.1, 0.1], [0.1, 0.0, 0.1], [0.1, 0.1, 0.0]])
+    G0 = rhat_start(R, S, k=3)
+    assert np.allclose(np.diag(G0), 0.0)
+    assert np.isclose(G0[0, 1], 0.2) and np.isclose(G0[1, 2], -0.1)     # shrunk, sign kept
+    assert G0[0, 2] == 0.0 and G0[1, 0] == 0.0 and G0[2, 1] == 0.0      # below 3 SE
+
+
+def test_latents_from_G_reproduces_G_through_the_model():
+    import jax
+    from numpyro.infer.util import initialize_model
+    kw = _small_model_kwargs()
+    rng = np.random.default_rng(4)
+    G = rng.normal(0, 0.3, (6, 6)) * (rng.random((6, 6)) < 0.5); np.fill_diagonal(G, 0.0)
+    mi = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=kw)
+    z = latents_from_G(G, kw["pi0_ij"], tau=0.1)
+    assert np.abs(np.asarray(z["eps"])).max() <= 1.0 + 1e-9
+    assert np.allclose(np.asarray(mi.postprocess_fn(z)["G"]), G, atol=1e-6)
+
+
+def test_latents_from_G_takes_the_most_probable_split():
+    """For each entry the split of lam * eps maximises the prior density in
+    the sampler's coordinates (log lam), and a zero entry gets the values
+    init_to_median gives."""
+    pi0 = np.full((3, 3), 0.5); tau = 0.1; m = 0.5 * tau
+    G = np.array([[0.0, 0.03, -0.2], [1.5, 0.0, 0.0], [0.0, -0.001, 0.0]])
+    z = latents_from_G(G, pi0, tau)
+    lam = np.exp(np.asarray(z["lam"])); eps = np.asarray(z["eps"])
+    assert np.allclose(lam[G == 0], 1.0) and np.allclose(eps[G == 0], 0.0)
+    f = lambda l, e: -np.log1p(l * l) + np.log(l) - 0.5 * e * e
+    for i, j in zip(*np.nonzero(G)):
+        a = abs(G[i, j]) / m
+        best = f(lam[i, j], eps[i, j])
+        for scale in (0.9, 0.99, 1.01, 1.1):          # other splits with the same product
+            l = lam[i, j] * scale
+            assert f(l, np.sign(G[i, j]) * a / l) < best
+
+
+def test_optimized_init_from_a_start_G():
+    import jax
+    kw = _small_model_kwargs()
+    G0 = rhat_start(kw["obs_data"], np.full((6, 6), 0.01), k=3)
+    z, info = optimized_init(matrix_model_spike_horseshoe, kw, jax.random.PRNGKey(0),
+                             num_chains=3, steps=200, start_G=G0)
+    assert z["eps"].shape == (3, 6, 6)
+    assert all(a <= b for a, b in zip(info["potential_after"], info["potential_before"]))
+
+
+def test_optimized_init_with_no_steps_starts_at_start_G():
+    import jax
+    from numpyro.infer.util import initialize_model
+    kw = _small_model_kwargs()
+    G0 = rhat_start(kw["obs_data"], np.full((6, 6), 0.01), k=3)
+    z, info = optimized_init(matrix_model_spike_horseshoe, kw, jax.random.PRNGKey(0),
+                             num_chains=2, steps=0, jitter=0.0, start_G=G0)
+    mi = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=kw)
+    for c in range(2):
+        Gc = np.asarray(mi.postprocess_fn(jax.tree_util.tree_map(lambda x: x[c], z))["G"])
+        assert np.allclose(Gc, G0, atol=1e-6)
+    assert np.allclose(info["potential_after"], info["potential_before"])
+
+
 def test_cap_and_redistribute_preserves_the_total():
     b = np.array([10.0, 1.0, 1.0, 1.0])
     out = _cap_and_redistribute(b, cap=5.0)
@@ -833,7 +898,7 @@ def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
             rho_penalty=rho_penalty, rho_estimator=rho_estimator, rho_sigma=0.5,
             rho_barrier_start=1.0, rho_barrier_width=0.2,
             init_strategy=init_strategy, init_opt_steps=200, init_opt_lr=0.01,
-            init_jitter=0.1,
+            init_jitter=0.1, init_rhat_k=3.0,
         ))
 
         pip = pd.read_csv(out / "pip.csv", index_col=0)
@@ -916,7 +981,17 @@ def test_end_to_end_outputs_are_well_formed_without_the_sf_anchor():
     assert diag["config"]["sf_anchor"] == "none"
 
 
-SLOW = {"test_end_to_end_outputs_are_well_formed_without_the_sf_anchor",
+def test_end_to_end_outputs_are_well_formed_with_the_rhat_start():
+    keep, pip, G, lfsr, diag = _run_pipeline(
+        truncated_series=False, save_diagnostics=True, init_strategy="rhat")
+    _check_outputs(keep, pip, G, lfsr, diag)
+    assert diag["config"]["init_strategy"] == "rhat"
+    assert diag["config"]["init_rhat_k"] == 3.0
+    assert len(diag["init"]["rho_start_per_chain"]) == diag["n_chains"]
+
+
+SLOW = {"test_end_to_end_outputs_are_well_formed_with_the_rhat_start",
+        "test_end_to_end_outputs_are_well_formed_without_the_sf_anchor",
         "test_end_to_end_outputs_are_well_formed_with_an_optimized_start",
         "test_end_to_end_outputs_are_well_formed",
         "test_end_to_end_outputs_are_well_formed_with_truncated_series",

@@ -18,7 +18,7 @@ from empirical_prior import (
     solve_spike_slab_diagonal_spike,
 )
 from model import (matrix_model_spike_horseshoe, compute_lfsr, convergent_draws,
-                   posterior_diagnostics, optimized_init)
+                   posterior_diagnostics, optimized_init, rhat_start)
 from iv_regression import xi_norm, run_all_IV
 
 
@@ -144,14 +144,22 @@ def main(args):
     )
 
     init_params, init_info = None, None
-    if args.init_strategy == "optimized":
-        print(f"4a) Optimising starting values ({args.init_opt_steps} Adam steps)...")
+    if args.init_strategy in ("optimized", "rhat"):
+        start_G = None
+        if args.init_strategy == "rhat":
+            # the total effects soft-thresholded at init_rhat_k standard errors
+            start_G = rhat_start(Rhat_df.values, pd.read_csv(SE_hat_path).values,
+                                 k=args.init_rhat_k)
+            print(f"4a) Starting from R_hat thresholded at {args.init_rhat_k} SE "
+                  f"({int((start_G != 0).sum())} nonzero entries)...")
+        if args.init_opt_steps > 0:
+            print(f"4a) Optimising starting values ({args.init_opt_steps} Adam steps)...")
         t_init = time.perf_counter()
         init_params, init_info = optimized_init(
             matrix_model_spike_horseshoe, model_kwargs,
             jax.random.fold_in(jax.random.PRNGKey(args.seed), 1),
             num_chains=args.num_chains, steps=args.init_opt_steps,
-            lr=args.init_opt_lr, jitter=args.init_jitter,
+            lr=args.init_opt_lr, jitter=args.init_jitter, start_G=start_G,
         )
         if args.num_chains == 1:
             init_params = jax.tree_util.tree_map(lambda x: x[0], init_params)
@@ -233,9 +241,10 @@ def main(args):
             "rho_barrier_width": args.rho_barrier_width if args.rho_penalty == "barrier" else None,
             "sf_anchor": args.sf_anchor if args.prior.lower() == "sf" else None,
             "init_strategy": args.init_strategy,
-            "init_opt_steps": args.init_opt_steps if args.init_strategy == "optimized" else None,
-            "init_opt_lr": args.init_opt_lr if args.init_strategy == "optimized" else None,
-            "init_jitter": args.init_jitter if args.init_strategy == "optimized" else None,
+            "init_opt_steps": args.init_opt_steps if args.init_strategy != "median" else None,
+            "init_opt_lr": args.init_opt_lr if args.init_strategy != "median" else None,
+            "init_jitter": args.init_jitter if args.init_strategy != "median" else None,
+            "init_rhat_k": args.init_rhat_k if args.init_strategy == "rhat" else None,
         }
         if init_info is not None:
             diagnostics["init"] = init_info
@@ -508,14 +517,17 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--init_strategy",
-        choices=["median", "optimized"],
+        choices=["median", "optimized", "rhat"],
         default="optimized",
         help=(
             "Where NUTS starts. 'median' is init_to_median(num_samples=50), an "
             "essentially empty G, from which SF chains at D = 150 left "
             "rho(G) < 1 early in warmup. 'optimized' starts there and takes "
-            "--init_opt_steps Adam steps on the log posterior first; the "
-            "posterior is unchanged. Default optimized."
+            "--init_opt_steps Adam steps on the log posterior first. 'rhat' "
+            "starts the same descent from R_hat soft-thresholded at "
+            "--init_rhat_k standard errors instead, which at D = 500 lands near "
+            "the optimum the empty start misses. The posterior is unchanged in "
+            "every case. Default optimized."
         ),
     )
 
@@ -523,7 +535,16 @@ if __name__ == "__main__":
         "--init_opt_steps",
         type=int,
         default=2000,
-        help="Adam steps for --init_strategy optimized. Default 2000.",
+        help=("Adam steps for --init_strategy optimized or rhat; 0 starts NUTS "
+              "at the (jittered) start itself. Default 2000."),
+    )
+
+    parser.add_argument(
+        "--init_rhat_k",
+        type=float,
+        default=3.0,
+        help=("Threshold, in standard errors, for --init_strategy rhat: the start "
+              "is sign(R_hat) * max(|R_hat| - k * SE, 0). Default 3."),
     )
 
     parser.add_argument(

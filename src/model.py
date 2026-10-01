@@ -62,8 +62,70 @@ def rho_log_penalty(rho, kind, sigma=0.5, start=1.0, width=0.2):
     raise ValueError(f"unknown rho penalty '{kind}'")
 
 
+def rhat_start(R_hat, se_hat, k=3.0):
+    """Starting G from the total effects: R_hat soft-thresholded at k standard errors.
+
+    sign(R_hat) * max(|R_hat| - k * S, 0), with a zero diagonal (R_hat_ii = 1 and
+    S_ii = 0 exactly, so subtracting I and zeroing the diagonal agree). This is
+    R - I, the total effects, not G: every node starts connected to all of its
+    descendants, and the descent has to prune the indirect paths. What it does
+    carry is orientation, from the asymmetry interventions create in R_hat (for
+    a true edge i -> j, R_ij is nonzero and R_ji is not), and it uses only the
+    model's own inputs, with no matrix inversion.
+
+    k matters. A null entry clears one standard error about a third of the time,
+    so at D = 500 k = 1 left ~77,000 spurious entries and ~14,000 pairs in both
+    directions; k = 3 left ~600 and under ten, with 83% of the direct edges
+    present and rho ~ 0.25. Higher k dropped too many true edges.
+
+    Args:
+        R_hat (np.ndarray): D x D total-effect estimates.
+        se_hat (np.ndarray): D x D standard errors of R_hat.
+        k (float): Threshold in standard errors.
+
+    Returns:
+        np.ndarray: D x D starting value for G.
+    """
+    R_hat = np.asarray(R_hat, dtype=float)
+    G0 = np.sign(R_hat) * np.maximum(np.abs(R_hat) - k * np.asarray(se_hat, dtype=float), 0.0)
+    np.fill_diagonal(G0, 0.0)
+    return G0
+
+
+def latents_from_G(G, pi0_ij, tau=0.1):
+    """Unconstrained values of the model's latents that reproduce a given G.
+
+    The model does not sample G; it samples lam ~ HalfCauchy(1) (on the log
+    scale), eps ~ N(0, 1) and spike ~ N(0, sigma0), and builds
+    G = pi0 * spike + (1 - pi0) * tau * lam * eps. Only the product lam * eps is
+    fixed by G, so each entry takes the most probable split under the prior,
+    with spike at its mode of 0. "Most probable" is in the coordinates the
+    sampler uses, log(lam), whose density carries the Jacobian term log(lam);
+    in lam's own coordinates the HalfCauchy mode is at 0, which is degenerate.
+
+    With m = (1 - pi0) tau and a = |G| / m, maximising
+    -log(1 + lam^2) + log(lam) - eps^2 / 2 subject to lam * eps = a gives
+
+        lam^2 = ((1 + a^2) + sqrt((1 + a^2)^2 + 4 a^2)) / 2,  eps = sign(G) a / lam,
+
+    the only stationary point, a maximum. A zero entry gets lam = 1, eps = 0,
+    the same values init_to_median gives; |eps| < 1 always. Entries the prior
+    holds at the spike (pi0 = 1, so m = 0) get lam = 1, eps = 0 and stay at
+    zero. Tied to the parameterisation of matrix_model_spike_horseshoe.
+    """
+    G = np.asarray(G, dtype=float)
+    m = (1.0 - np.asarray(pi0_ij, dtype=float)) * tau
+    slab = m > 1e-12
+    a = np.where(slab, np.abs(G) / np.where(slab, m, 1.0), 0.0)
+    b = 1.0 + a * a
+    lam = np.sqrt(0.5 * (b + np.sqrt(b * b + 4.0 * a * a)))
+    eps = np.sign(G) * a / lam
+    return {"lam": jnp.log(jnp.asarray(lam)), "eps": jnp.asarray(eps),
+            "spike": jnp.zeros(G.shape)}
+
+
 def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2,
-                   jitter=0.1):
+                   jitter=0.1, start_G=None):
     """Starting points for NUTS from a short optimisation of the log posterior.
 
     From the default start, init_to_median, G is essentially empty and far from
@@ -74,25 +136,37 @@ def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2
     Adam steps reaches rho ~ 0.6 on every seed tested. The posterior is
     unchanged; only where the sampler begins is.
 
+    At D = 500 the empty start is not enough: even a slow descent from it finds
+    a wrong graph 3,000-5,500 nats below the optimum near the true G. Passing
+    `start_G` (see rhat_start) begins the descent from the thresholded total
+    effects instead, which lands within ~650-900 nats of it with valid rho.
+
     Uses numpyro.optim.Adam, a wrapper over jax.example_libraries.optimizers,
     so it adds no dependency. Adam moves each coordinate by about lr per step
     whatever the size of its gradient, which is what keeps the descent from
-    overshooting the way an untuned leapfrog step does.
+    overshooting the way an untuned leapfrog step does. At D >= 250 it does not
+    fully settle at lr = 0.01 and the last iterate can sit a few thousand nats
+    above the best one visited, but in the same basin (F1 within 0.005), which
+    is negligible next to the ~3 D^2 / 2 nats NUTS climbs from the mode into
+    the typical set, so the last iterate is returned.
 
-    Each chain starts from its own init_to_median draw and is optimised
-    separately. The chains end up close together, which would leave split
+    Without `start_G` each chain starts from its own init_to_median draw; with
+    it, every chain starts from start_G with `jitter` added so the descents
+    differ. The chains still end up close together, which would leave split
     R-hat little to compare, so `jitter` (in unconstrained units) is added to
-    log(lam) and eps afterwards. The spike is left as optimised, since its
-    prior scale is sigma0 = 1e-3.
+    log(lam) and eps afterwards too. The spike is left as optimised, since its
+    prior scale is sigma0 = 1e-3. steps = 0 skips the optimisation and starts
+    NUTS at the jittered start itself.
 
     Args:
         model: The numpyro model.
         model_kwargs (dict): Keyword arguments for the model.
         rng_key: PRNG key.
         num_chains (int): Number of starting points.
-        steps (int): Adam steps.
+        steps (int): Adam steps; 0 for none.
         lr (float): Adam learning rate.
         jitter (float): Standard deviation of the noise added afterwards.
+        start_G (np.ndarray): Optional D x D G to start the descent from.
 
     Returns:
         z (dict): Unconstrained starting values with a leading chain axis,
@@ -100,6 +174,7 @@ def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2
         info (dict): Potential energy before and after, and rho(G) at the
             start of each chain.
     """
+    import inspect
     import jax
     from numpyro import infer
     from numpyro.infer.util import initialize_model
@@ -113,6 +188,24 @@ def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2
     grad = jax.grad(potential)
     opt = Adam(lr)
 
+    def add_jitter(z, key):
+        keys = jax.random.split(key, 2)
+        for kk, name in zip(keys, ("lam", "eps")):
+            if name in z:
+                z[name] = z[name] + jitter * jax.random.normal(kk, z[name].shape)
+        return z
+
+    if start_G is None:
+        z0 = mi.param_info.z
+    else:
+        tau = model_kwargs.get("tau", inspect.signature(model).parameters["tau"].default)
+        one = latents_from_G(start_G, model_kwargs["pi0_ij"], tau)
+        z0 = {name: jnp.broadcast_to(one[name], (num_chains,) + one[name].shape)
+              for name in mi.param_info.z}
+        if steps > 0:
+            # its own key, so the path without start_G draws exactly as before
+            z0 = add_jitter(dict(z0), jax.random.fold_in(k_jit, 1))
+
     def optimise(z0):
         def step(state, _):
             return opt.update(grad(opt.get_params(state)), state), None
@@ -120,12 +213,8 @@ def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2
         z = opt.get_params(state)
         return z, potential(z0), potential(z)
 
-    z, pe_start, pe_end = jax.jit(jax.vmap(optimise))(mi.param_info.z)
-
-    keys = jax.random.split(k_jit, 2)
-    for key, name in zip(keys, ("lam", "eps")):
-        if name in z:
-            z[name] = z[name] + jitter * jax.random.normal(key, z[name].shape)
+    z, pe_start, pe_end = jax.jit(jax.vmap(optimise))(z0)
+    z = add_jitter(dict(z), k_jit)
 
     G = np.asarray(jax.vmap(mi.postprocess_fn)(z)["G"], dtype=np.float64)
     rho = np.abs(np.linalg.eigvals(G)).max(axis=1)
