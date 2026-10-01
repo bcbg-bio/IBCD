@@ -809,7 +809,7 @@ def test_combine_chains_excludes_nonconvergent_draws():
 # --------------------------------------------------------------------------
 
 def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
-                  rho_estimator="power", init_strategy="median"):
+                  rho_estimator="power", init_strategy="median", sf_anchor="em"):
     """Run the real pipeline on a small subset of the shipped example data."""
     import argparse
     import ibcd
@@ -824,7 +824,7 @@ def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
         out = Path(tmp) / "out"
         ibcd.main(argparse.Namespace(
             data=str(path), prior="sf", output_dir=str(out),
-            alpha_er=2.0, pi0_floor=0.05,
+            alpha_er=2.0, pi0_floor=0.05, sf_anchor=sf_anchor,
             num_warmup=20, num_samples=40, num_chains=1, epsilon=0.05,
             chain_method="vectorized",
             target_accept_prob=0.7, max_tree_depth=10,
@@ -909,7 +909,15 @@ def test_end_to_end_outputs_are_well_formed_with_an_optimized_start():
                                      diag["init"]["potential_before"]))
 
 
-SLOW = {"test_end_to_end_outputs_are_well_formed_with_an_optimized_start",
+def test_end_to_end_outputs_are_well_formed_without_the_sf_anchor():
+    keep, pip, G, lfsr, diag = _run_pipeline(
+        truncated_series=False, save_diagnostics=True, sf_anchor="none")
+    _check_outputs(keep, pip, G, lfsr, diag)
+    assert diag["config"]["sf_anchor"] == "none"
+
+
+SLOW = {"test_end_to_end_outputs_are_well_formed_without_the_sf_anchor",
+        "test_end_to_end_outputs_are_well_formed_with_an_optimized_start",
         "test_end_to_end_outputs_are_well_formed",
         "test_end_to_end_outputs_are_well_formed_with_truncated_series",
         "test_end_to_end_outputs_are_well_formed_with_a_rho_penalty"}

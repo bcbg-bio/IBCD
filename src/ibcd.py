@@ -57,12 +57,16 @@ def main(args):
         # the overall sparsity. The EM of equation 12 supplies that level, the
         # same one equation 18 gives the ER prior; theta then only decides how
         # it is shared across rows.
-        w, se_hat = load_R_and_SE_hat(Rhat_path, SE_hat_path)
-        pi0_global, _, _ = empirical_bayes_em(w, se_hat, alpha_er=args.alpha_er)
-        pi0_i = scale_free_degree(R, pi0_global=float(pi0_global),
-                                  pi0_floor=args.pi0_floor)
-
-        print("Estimated global spike weight:", float(pi0_global))
+        # --sf_anchor none restores the published max-normalisation, which
+        # has no sparsity level of its own.
+        if args.sf_anchor == "em":
+            w, se_hat = load_R_and_SE_hat(Rhat_path, SE_hat_path)
+            pi0_global, _, _ = empirical_bayes_em(w, se_hat, alpha_er=args.alpha_er)
+            pi0_i = scale_free_degree(R, pi0_global=float(pi0_global),
+                                      pi0_floor=args.pi0_floor)
+            print("Estimated global spike weight:", float(pi0_global))
+        else:
+            pi0_i = scale_free_degree(R)
         print("Estimated spike weight:", pi0_i)
         print("3) Running edge specific weights for SF...")
         pi0_ij, pi_k_ij = solve_edge_weights_rowwise(
@@ -227,6 +231,7 @@ def main(args):
             "rho_sigma": args.rho_sigma if args.rho_penalty == "gaussian" else None,
             "rho_barrier_start": args.rho_barrier_start if args.rho_penalty == "barrier" else None,
             "rho_barrier_width": args.rho_barrier_width if args.rho_penalty == "barrier" else None,
+            "sf_anchor": args.sf_anchor if args.prior.lower() == "sf" else None,
             "init_strategy": args.init_strategy,
             "init_opt_steps": args.init_opt_steps if args.init_strategy == "optimized" else None,
             "init_opt_lr": args.init_opt_lr if args.init_strategy == "optimized" else None,
@@ -334,6 +339,18 @@ if __name__ == "__main__":
         help="Directory to save all outputs.",
     )
 
+    parser.add_argument(
+        "--sf_anchor",
+        choices=["em", "none"],
+        default="em",
+        help=(
+            "SF prior only: where the overall sparsity level comes from. 'em' "
+            "takes the global spike weight from the EM of equation 12 and lets "
+            "the degree profile share it out across rows. 'none' is the "
+            "published max-normalisation, pi0_i = 1 - theta_i / max(theta, "
+            "phi), which has no level of its own. Default em."
+        ),
+    )
     parser.add_argument(
         "--pi0_floor",
         type=float,
@@ -492,12 +509,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--init_strategy",
         choices=["median", "optimized"],
-        default="median",
+        default="optimized",
         help=(
             "Where NUTS starts. 'median' is init_to_median(num_samples=50), an "
-            "essentially empty G. 'optimized' starts there and takes "
+            "essentially empty G, from which SF chains at D = 150 left "
+            "rho(G) < 1 early in warmup. 'optimized' starts there and takes "
             "--init_opt_steps Adam steps on the log posterior first; the "
-            "posterior is unchanged. Default median."
+            "posterior is unchanged. Default optimized."
         ),
     )
 

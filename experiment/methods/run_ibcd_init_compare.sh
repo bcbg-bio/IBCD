@@ -17,8 +17,10 @@
 # keeps the indices it had before ER was added, so an SF-only submission of
 # [1-20] is unchanged; submit [21-40] to add ER alone.
 #
-# median/none (SF 1-5, ER 21-25) is the current default, so it should
-# reproduce the Figure 2 sweep's inverse/150d/100/<graph> runs byte-for-byte;
+# median/none (SF 1-5, ER 21-25) was the default when this ran; the default
+# start is now optimized, but the median arms pass --init_strategy median
+# explicitly. median/none reproduces the Figure 2 sweep's
+# inverse/150d/100/<graph> runs byte-for-byte;
 # SF seed 44 is the one that sweep lost to a cluster abort, and all ten ER
 # runs there completed, so ER 21-25 can be skipped. Sampler settings are the
 # defaults, as in the other sweeps.

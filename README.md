@@ -79,18 +79,20 @@ inexpensive to reproduce on a CPU; the run above takes roughly 15 minutes on a
 
 ### Arguments ###
 ```
-usage: ibcd.py [-h] --data DATA --prior {sf,er} --output_dir OUTPUT_DIR
-               [--alpha_er ALPHA_ER] [--num_warmup NUM_WARMUP]
+usage: ibcd.py [-h] --data DATA --prior {sf,er} --output_dir OUTPUT_DIR [--sf_anchor {em,none}]
+               [--pi0_floor PI0_FLOOR] [--alpha_er ALPHA_ER] [--num_warmup NUM_WARMUP]
                [--num_samples NUM_SAMPLES] [--num_chains NUM_CHAINS]
-               [--target_accept_prob TARGET_ACCEPT_PROB]
-               [--max_tree_depth MAX_TREE_DEPTH]
-               [--chain_method {parallel,sequential,vectorized}]
-               [--save_diagnostics] [--seed SEED] [--truncated_series]
-               [--series_order SERIES_ORDER] [--epsilon EPSILON]
+               [--target_accept_prob TARGET_ACCEPT_PROB] [--max_tree_depth MAX_TREE_DEPTH]
+               [--chain_method {parallel,sequential,vectorized}] [--save_diagnostics] [--seed SEED]
+               [--truncated_series] [--series_order SERIES_ORDER] [--rho_penalty {none,gaussian,barrier}]
+               [--rho_estimator {power,gelfand}] [--rho_sigma RHO_SIGMA]
+               [--rho_barrier_start RHO_BARRIER_START] [--rho_barrier_width RHO_BARRIER_WIDTH]
+               [--init_strategy {median,optimized}] [--init_opt_steps INIT_OPT_STEPS]
+               [--init_opt_lr INIT_OPT_LR] [--init_jitter INIT_JITTER] [--epsilon EPSILON]
 
-IBCD pipeline. 1) Load data.csv (Y_matrix + target) 2) Run 2SLS 3) Choose SF (scale-free) or ER
-(Erdős–Rényi) empirical prior 4) Fit empricial Bayesian spike-and-slab on matrix normal model 5) Output G
-draws, posterior mean G, PIP, and LFSR.
+IBCD pipeline. 1) Load data.csv (observation + intervention) 2) Run 2SLS 3) Choose SF (scale-free) or ER
+(Erdős–Rényi) empirical prior 4) Fit empirical Bayesian spike-and-slab prior on matrix normal model 5)
+Output G, PIP, and LFSR.
 
 options:
   -h, --help            show this help message and exit
@@ -98,6 +100,15 @@ options:
   --prior {sf,er}       Choice of empirical prior: 'sf' = scale-free, 'er' = Erdős–Rényi.
   --output_dir OUTPUT_DIR
                         Directory to save all outputs.
+  --sf_anchor {em,none}
+                        SF prior only: where the overall sparsity level comes from. 'em' takes the global
+                        spike weight from the EM of equation 12 and lets the degree profile share it out
+                        across rows. 'none' is the published max-normalisation, pi0_i = 1 - theta_i /
+                        max(theta, phi), which has no level of its own. Default em.
+  --pi0_floor PI0_FLOOR
+                        SF prior only: smallest per-node spike proportion, so no row is left entirely
+                        unshrunk. The row budget is capped at (1 - pi0_floor) * (D - 1) and the excess
+                        redistributed.
   --alpha_er ALPHA_ER   Alpha for EM in ER prior. Controls shrinkage strength. Default=2.0.
   --num_warmup NUM_WARMUP
                         Number of NUTS warm-up iterations. Default = 1000.
@@ -115,19 +126,48 @@ options:
                         How to draw multiple chains. 'vectorized' maps them onto one device, which is the
                         only form of within-process parallelism available when CUDA exposes a single device,
                         and avoids the post-hoc stack that 'sequential' pays for. 'parallel' needs one
-                        visible device per chain and falls back to sequential otherwise. Default = vectorized.
+                        visible device per chain and falls back to sequential otherwise. Default =
+                        vectorized.
   --save_diagnostics    Write diagnostics.json to the output directory: divergences, leapfrog steps, split
                         R-hat, ESS, spectral-radius quantiles, rejected-draw counts, runtime and the run
-                        configuration. Off by default because R-hat and ESS are O(D^2) over the entries of G.
+                        configuration. Off by default because R-hat and ESS are O(D^2) over the entries of
+                        G.
   --seed SEED           PRNG seed for MCMC. Default = 42.
-  --truncated_series    Compute R as a truncated path sum instead of inverting (I - G). The sum has no
-                        pole and bounded gradients, but costs roughly an order of magnitude more per
-                        gradient. Default is the inverse.
+  --truncated_series    Compute R as a truncated path sum instead of inverting (I - G). The sum has no pole
+                        and bounded gradients, but costs roughly an order of magnitude more per gradient.
+                        Default is the inverse.
   --series_order SERIES_ORDER
                         Highest power retained in the truncated path sum for R = sum_d G^d. Exact once it
                         reaches the longest directed path in the graph. Only used with --truncated_series.
                         Default = 24.
-  --epsilon EPSILON     Threshold for computing PIP: edges with |G| > epsilon are counted as active.
-                        Default = 0.05.
+  --rho_penalty {none,gaussian,barrier}
+                        Constraint on the spectral radius of G. 'gaussian' is the Appendix H prior N(0,
+                        rho_sigma^2) on rho; 'barrier' is zero below --rho_barrier_start and rises as ((rho
+                        - start)/width)^2 above it. Default none.
+  --rho_estimator {power,gelfand}
+                        How rho is computed for --rho_penalty: 'power' is the Appendix H power iteration (50
+                        steps), 'gelfand' an upper bound from ||G^64||^(1/64). Default power.
+  --rho_sigma RHO_SIGMA
+                        Scale of the Gaussian rho penalty. Default 0.5, as on main.
+  --rho_barrier_start RHO_BARRIER_START
+                        Spectral radius where the barrier begins. Default 1.0.
+  --rho_barrier_width RHO_BARRIER_WIDTH
+                        Distance past --rho_barrier_start over which the barrier costs 1 nat; smaller is
+                        steeper. Default 0.2.
+  --init_strategy {median,optimized}
+                        Where NUTS starts. 'median' is init_to_median(num_samples=50), an essentially empty
+                        G, from which SF chains at D = 150 left rho(G) < 1 early in warmup. 'optimized'
+                        starts there and takes --init_opt_steps Adam steps on the log posterior first; the
+                        posterior is unchanged. Default optimized.
+  --init_opt_steps INIT_OPT_STEPS
+                        Adam steps for --init_strategy optimized. Default 2000.
+  --init_opt_lr INIT_OPT_LR
+                        Adam learning rate for --init_strategy optimized. Larger values can overshoot rho =
+                        1 on the way down. Default 0.01.
+  --init_jitter INIT_JITTER
+                        Noise added to log(lam) and eps after optimising, so the chains do not start at one
+                        point. Default 0.1.
+  --epsilon EPSILON     Threshold for computing PIP: edges with |G| > epsilon are counted as active. Default
+                        = 0.05.
 ```
 
