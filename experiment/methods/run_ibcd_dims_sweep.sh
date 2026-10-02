@@ -21,7 +21,7 @@
 #
 #   mkdir -p logs && bsub < run_ibcd_dims_sweep.sh
 
-#BSUB -J "IBCDdim[1-80]%20"
+#BSUB -J "IBCDdim[1-80]"
 #BSUB -q dbeigpu
 #BSUB -n 1
 #BSUB -gpu "num=1:gmem=40G"

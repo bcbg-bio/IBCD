@@ -20,7 +20,7 @@
 #
 #   mkdir -p logs && bsub < run_ibcd_nint_sweep.sh
 
-#BSUB -J "IBCDnint[1-100]%40"
+#BSUB -J "IBCDnint[1-100]"
 #BSUB -q dbeigpu
 #BSUB -n 1
 #BSUB -gpu "num=1:gmem=20G"
