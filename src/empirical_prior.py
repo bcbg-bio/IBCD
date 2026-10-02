@@ -130,6 +130,19 @@ def empirical_bayes_em(w, se_hat, K=50, sigma0=0.001, sigma_min=0.01, sigma_max=
 
     return pi_0, pi_k, sigma_k
 
+def em_slab_scale(pi_k, sigma_k):
+    """Root-mean-square standard deviation of the EM's fitted slab.
+
+    sqrt(sum_k pi_k sigma_k^2 / sum_k pi_k) over the slab components of
+    empirical_bayes_em, excluding the spike. It is fitted to R_hat, the total
+    effects, but in simulation at D = 500 it came out at 0.21-0.24 against a
+    true direct-edge scale of 0.27-0.28, with only 3-6% of the slab weight on
+    the grid's lowest component.
+    """
+    pi_k = np.asarray(pi_k, dtype=float); sigma_k = np.asarray(sigma_k, dtype=float)
+    return float(np.sqrt((pi_k * sigma_k ** 2).sum() / pi_k.sum()))
+
+
 def solve_spike_slab_diagonal_spike(
     xi,
     pi0,

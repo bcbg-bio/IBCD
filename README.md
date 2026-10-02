@@ -87,9 +87,9 @@ usage: ibcd.py [-h] --data DATA --prior {sf,er} --output_dir OUTPUT_DIR [--sf_an
                [--truncated_series] [--series_order SERIES_ORDER] [--rho_penalty {none,gaussian,barrier}]
                [--rho_estimator {power,gelfand}] [--rho_sigma RHO_SIGMA]
                [--rho_barrier_start RHO_BARRIER_START] [--rho_barrier_width RHO_BARRIER_WIDTH]
-               [--init_strategy {median,optimized,rhat}] [--init_opt_steps INIT_OPT_STEPS]
-               [--init_rhat_k INIT_RHAT_K] [--init_opt_lr INIT_OPT_LR] [--init_jitter INIT_JITTER]
-               [--epsilon EPSILON]
+               [--init_strategy {median,optimized,rhat,file}] [--init_opt_steps INIT_OPT_STEPS]
+               [--init_G INIT_G] [--slab_width SLAB_WIDTH] [--init_rhat_k INIT_RHAT_K]
+               [--init_opt_lr INIT_OPT_LR] [--init_jitter INIT_JITTER] [--epsilon EPSILON]
 
 IBCD pipeline. 1) Load data.csv (observation + intervention) 2) Run 2SLS 3) Choose SF (scale-free) or ER
 (Erdős–Rényi) empirical prior 4) Fit empirical Bayesian spike-and-slab prior on matrix normal model 5)
@@ -155,16 +155,23 @@ options:
   --rho_barrier_width RHO_BARRIER_WIDTH
                         Distance past --rho_barrier_start over which the barrier costs 1 nat; smaller is
                         steeper. Default 0.2.
-  --init_strategy {median,optimized,rhat}
+  --init_strategy {median,optimized,rhat,file}
                         Where NUTS starts. 'median' is init_to_median(num_samples=50), an essentially empty
                         G, from which SF chains at D = 150 left rho(G) < 1 early in warmup. 'optimized'
                         starts there and takes --init_opt_steps Adam steps on the log posterior first.
                         'rhat' starts the same descent from R_hat soft-thresholded at --init_rhat_k standard
-                        errors instead, which at D = 500 lands near the optimum the empty start misses. The
+                        errors instead, which at D = 500 lands near the optimum the empty start misses.
+                        'file' starts it from the G in --init_G, e.g. the true G in a simulation. The
                         posterior is unchanged in every case. Default optimized.
   --init_opt_steps INIT_OPT_STEPS
                         Adam steps for --init_strategy optimized or rhat; 0 starts NUTS at the (jittered)
                         start itself. Default 2000.
+  --init_G INIT_G       D x D CSV of G to start from, for --init_strategy file.
+  --slab_width SLAB_WIDTH
+                        'none' for the horseshoe as published; 'em' for the regularised horseshoe with its
+                        slab width set to the RMS scale of the EM's fitted slab; or a number. The
+                        regularised slab's tail beyond the width is Gaussian rather than Cauchy. Default
+                        none.
   --init_rhat_k INIT_RHAT_K
                         Threshold, in standard errors, for --init_strategy rhat: the start is sign(R_hat) *
                         max(|R_hat| - k * SE, 0). Default 3.

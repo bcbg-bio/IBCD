@@ -42,6 +42,7 @@ from model import (  # noqa: E402
 from empirical_prior import (  # noqa: E402
     _cap_and_redistribute,
     _project_to_budget,
+    em_slab_scale,
     load_R_and_SE_hat,
     scale_free_degree,
     solve_edge_weights_rowwise,
@@ -511,6 +512,40 @@ def test_latents_from_G_takes_the_most_probable_split():
             assert f(l, np.sign(G[i, j]) * a / l) < best
 
 
+def test_em_slab_scale_is_the_rms_of_the_slab():
+    pi_k = np.array([0.3, 0.1, 0.0]); sigma_k = np.array([0.1, 0.5, 1.0])
+    assert np.isclose(em_slab_scale(pi_k, sigma_k), np.sqrt((0.3 * 0.01 + 0.1 * 0.25) / 0.4))
+
+
+def test_regularised_slab_saturates_at_its_width():
+    """With a slab width c, an entry's whole slab scale saturates at c however
+    large lam gets, which is what removes the Cauchy tail; every entry can
+    still reach c, whatever its (1 - pi0)."""
+    import jax
+    import jax.numpy as jnp
+    from numpyro.infer.util import initialize_model
+    kw = dict(_small_model_kwargs(), slab_width=0.2)
+    mi = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=kw)
+    z = {"lam": jnp.full((6, 6), np.log(1e6)), "eps": jnp.ones((6, 6)), "spike": jnp.zeros((6, 6))}
+    G = np.asarray(mi.postprocess_fn(z)["G"])
+    off = ~np.eye(6, dtype=bool)
+    assert np.allclose(G[off], 0.2, rtol=1e-3)
+    # and without one, the same latents give an enormous G
+    mi0 = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=_small_model_kwargs())
+    assert np.asarray(mi0.postprocess_fn(z)["G"])[off].min() > 1e3
+
+
+def test_latents_from_G_reproduces_G_with_a_slab_width():
+    import jax
+    from numpyro.infer.util import initialize_model
+    kw = dict(_small_model_kwargs(), slab_width=0.2)
+    rng = np.random.default_rng(6)
+    G = rng.normal(0, 0.3, (6, 6)) * (rng.random((6, 6)) < 0.5); np.fill_diagonal(G, 0.0)
+    mi = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=kw)
+    z = latents_from_G(G, kw["pi0_ij"], tau=0.1, slab_width=0.2)
+    assert np.allclose(np.asarray(mi.postprocess_fn(z)["G"]), G, atol=1e-6)
+
+
 def test_optimized_init_from_a_start_G():
     import jax
     kw = _small_model_kwargs()
@@ -874,7 +909,8 @@ def test_combine_chains_excludes_nonconvergent_draws():
 # --------------------------------------------------------------------------
 
 def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
-                  rho_estimator="power", init_strategy="median", sf_anchor="em"):
+                  rho_estimator="power", init_strategy="median", sf_anchor="em",
+                  slab_width="none", init_G_matrix=None):
     """Run the real pipeline on a small subset of the shipped example data."""
     import argparse
     import ibcd
@@ -887,6 +923,10 @@ def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
         path = Path(tmp) / "data.csv"
         sub.to_csv(path, index=False)
         out = Path(tmp) / "out"
+        init_G = None
+        if init_G_matrix is not None:
+            init_G = str(Path(tmp) / "G_start.csv")
+            pd.DataFrame(init_G_matrix, columns=keep).to_csv(init_G, index=False)
         ibcd.main(argparse.Namespace(
             data=str(path), prior="sf", output_dir=str(out),
             alpha_er=2.0, pi0_floor=0.05, sf_anchor=sf_anchor,
@@ -898,7 +938,7 @@ def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
             rho_penalty=rho_penalty, rho_estimator=rho_estimator, rho_sigma=0.5,
             rho_barrier_start=1.0, rho_barrier_width=0.2,
             init_strategy=init_strategy, init_opt_steps=200, init_opt_lr=0.01,
-            init_jitter=0.1, init_rhat_k=3.0,
+            init_jitter=0.1, init_rhat_k=3.0, init_G=init_G, slab_width=slab_width,
         ))
 
         pip = pd.read_csv(out / "pip.csv", index_col=0)
@@ -990,7 +1030,20 @@ def test_end_to_end_outputs_are_well_formed_with_the_rhat_start():
     assert len(diag["init"]["rho_start_per_chain"]) == diag["n_chains"]
 
 
-SLOW = {"test_end_to_end_outputs_are_well_formed_with_the_rhat_start",
+def test_end_to_end_outputs_are_well_formed_with_a_slab_width_and_a_file_start():
+    rng = np.random.default_rng(7)
+    G0 = np.triu(rng.normal(0, 0.2, (10, 10)) * (rng.random((10, 10)) < 0.3), 1)
+    keep, pip, G, lfsr, diag = _run_pipeline(
+        truncated_series=False, save_diagnostics=True, init_strategy="file",
+        slab_width="em", init_G_matrix=G0)
+    _check_outputs(keep, pip, G, lfsr, diag)
+    assert diag["config"]["init_strategy"] == "file"
+    assert diag["config"]["slab_width"] == "em"
+    assert 0.1 <= diag["config"]["slab_width_value"] <= 1.0      # within the EM's grid
+
+
+SLOW = {"test_end_to_end_outputs_are_well_formed_with_a_slab_width_and_a_file_start",
+        "test_end_to_end_outputs_are_well_formed_with_the_rhat_start",
         "test_end_to_end_outputs_are_well_formed_without_the_sf_anchor",
         "test_end_to_end_outputs_are_well_formed_with_an_optimized_start",
         "test_end_to_end_outputs_are_well_formed",

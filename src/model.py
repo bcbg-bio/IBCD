@@ -92,7 +92,7 @@ def rhat_start(R_hat, se_hat, k=3.0):
     return G0
 
 
-def latents_from_G(G, pi0_ij, tau=0.1):
+def latents_from_G(G, pi0_ij, tau=0.1, slab_width=None):
     """Unconstrained values of the model's latents that reproduce a given G.
 
     The model does not sample G; it samples lam ~ HalfCauchy(1) (on the log
@@ -112,6 +112,12 @@ def latents_from_G(G, pi0_ij, tau=0.1):
     the same values init_to_median gives; |eps| < 1 always. Entries the prior
     holds at the spike (pi0 = 1, so m = 0) get lam = 1, eps = 0 and stay at
     zero. Tied to the parameterisation of matrix_model_spike_horseshoe.
+
+    With a slab width c the model caps each entry's scale s = (1 - pi0) tau lam
+    at c via c s / sqrt(c^2 + s^2). lam is then taken from the same closed form
+    and eps absorbs the cap, so G is still reproduced exactly; eps exceeds 1
+    only for entries larger than about c (the edge scale), and the Adam
+    descent rebalances the two.
     """
     G = np.asarray(G, dtype=float)
     m = (1.0 - np.asarray(pi0_ij, dtype=float)) * tau
@@ -119,7 +125,12 @@ def latents_from_G(G, pi0_ij, tau=0.1):
     a = np.where(slab, np.abs(G) / np.where(slab, m, 1.0), 0.0)
     b = 1.0 + a * a
     lam = np.sqrt(0.5 * (b + np.sqrt(b * b + 4.0 * a * a)))
-    eps = np.sign(G) * a / lam
+    if slab_width is None:
+        eps = np.sign(G) * a / lam
+    else:
+        sc = m * lam
+        sc = slab_width * sc / np.sqrt(slab_width ** 2 + sc ** 2)
+        eps = np.where(slab, G / np.maximum(sc, 1e-300), 0.0)
     return {"lam": jnp.log(jnp.asarray(lam)), "eps": jnp.asarray(eps),
             "spike": jnp.zeros(G.shape)}
 
@@ -151,10 +162,9 @@ def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2
     the typical set, so the last iterate is returned.
 
     Without `start_G` each chain starts from its own init_to_median draw; with
-    it, every chain starts from start_G with `jitter` added so the descents
-    differ. The chains still end up close together, which would leave split
-    R-hat little to compare, so `jitter` (in unconstrained units) is added to
-    log(lam) and eps afterwards too. The spike is left as optimised, since its
+    it, every chain starts from start_G. The chains end up close together,
+    which would leave split R-hat little to compare, so `jitter` (in
+    unconstrained units) is added to log(lam) and eps afterwards. The spike is left as optimised, since its
     prior scale is sigma0 = 1e-3. steps = 0 skips the optimisation and starts
     NUTS at the jittered start itself.
 
@@ -199,12 +209,15 @@ def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2
         z0 = mi.param_info.z
     else:
         tau = model_kwargs.get("tau", inspect.signature(model).parameters["tau"].default)
-        one = latents_from_G(start_G, model_kwargs["pi0_ij"], tau)
+        one = latents_from_G(start_G, model_kwargs["pi0_ij"], tau,
+                             slab_width=model_kwargs.get("slab_width"))
+        # every chain descends from start_G itself; the jitter after the
+        # descent separates them. Jittering before it as well put small
+        # nonzero values on the null entries of the hub rows, which Adam at
+        # lr 0.01 grew into cycles: from the true G at D = 500, rho went from
+        # 0.38 to ~3 over 2000 steps, against 0.62 without it.
         z0 = {name: jnp.broadcast_to(one[name], (num_chains,) + one[name].shape)
               for name in mi.param_info.z}
-        if steps > 0:
-            # its own key, so the path without start_G draws exactly as before
-            z0 = add_jitter(dict(z0), jax.random.fold_in(k_jit, 1))
 
     def optimise(z0):
         def step(state, _):
@@ -229,7 +242,8 @@ def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2
 def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0.001, tau=0.1,
                                  epsilon=1e-5, truncated_series=False, series_order=24,
                                  rho_penalty=None, rho_estimator="power", rho_sigma=0.5,
-                                 rho_barrier_start=1.0, rho_barrier_width=0.2):
+                                 rho_barrier_start=1.0, rho_barrier_width=0.2,
+                                 slab_width=None):
     """
     NumPyro model: Spike-and-horseshoe prior over matrix G, MatrixNormal likelihood.
 
@@ -258,6 +272,13 @@ def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0
         rho_sigma (float): Scale of the Gaussian penalty; 0.5 as on main.
         rho_barrier_start (float): Spectral radius where the barrier begins.
         rho_barrier_width (float): Distance over which the barrier costs 1 nat.
+        slab_width (float): None for the horseshoe as published. Otherwise a
+            regularised horseshoe (Piironen & Vehtari 2017) applied to each
+            entry's whole slab scale s = (1 - pi0) tau lam, replaced by
+            c s / sqrt(c^2 + s^2): an entry can still reach scale c through a
+            large lam, but its tail beyond c is Gaussian rather than Cauchy.
+            The horseshoe's tail falls only as tau / t, so at D = 500 a prior
+            draw has ~350 entries with |G| > 1.
     """
 
     # Sample horseshoe local scales (HalfCauchy), shape (D, D)
@@ -276,7 +297,18 @@ def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0
     # zeroed: the model has no self-loops, R_ii is fixed at 1 by definition,
     # and a nonzero diagonal would stop a DAG's G from being nilpotent, so the
     # path sum below would not terminate exactly.
-    G = pi0_ij * spike_vals + (1. - pi0_ij) * slab_vals
+    if slab_width is None:
+        G = pi0_ij * spike_vals + (1. - pi0_ij) * slab_vals
+    else:
+        # Cap each entry's whole slab scale, (1 - pi0) tau lam, at the width.
+        # Capping lam alone would cap the entry at (1 - pi0) c, which in rows
+        # the SF prior shrinks hard (1 - pi0 down to ~1e-7) leaves true edges
+        # needing |eps| in the thousands: at D = 500, 57-59% of true edges
+        # would need |eps| > 3. Capping the product keeps the horseshoe's
+        # escape hatch (a large lam, at ~2 log lam) up to the width.
+        s = (1. - pi0_ij) * tau * lam
+        s = slab_width * s / jnp.sqrt(slab_width ** 2 + s ** 2)
+        G = pi0_ij * spike_vals + s * eps
     G = G * (1. - jnp.eye(D))
     numpyro.deterministic("G", G)           # keep only G
 

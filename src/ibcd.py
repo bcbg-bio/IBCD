@@ -15,6 +15,7 @@ from empirical_prior import (
     solve_edge_weights_rowwise,
     load_R_and_SE_hat,
     empirical_bayes_em,
+    em_slab_scale,
     solve_spike_slab_diagonal_spike,
 )
 from model import (matrix_model_spike_horseshoe, compute_lfsr, convergent_draws,
@@ -48,6 +49,7 @@ def main(args):
 
     D = xi.shape[0]
 
+    em_pi_k = em_sigma_k = None          # the EM's slab fit, if it is run
     if args.prior.lower() == "sf":
         # -------- Scale-free (SF) prior --------
         print("2) Using SF prior (Scale-Free)...")
@@ -61,7 +63,7 @@ def main(args):
         # has no sparsity level of its own.
         if args.sf_anchor == "em":
             w, se_hat = load_R_and_SE_hat(Rhat_path, SE_hat_path)
-            pi0_global, _, _ = empirical_bayes_em(w, se_hat, alpha_er=args.alpha_er)
+            pi0_global, em_pi_k, em_sigma_k = empirical_bayes_em(w, se_hat, alpha_er=args.alpha_er)
             pi0_i = scale_free_degree(R, pi0_global=float(pi0_global),
                                       pi0_floor=args.pi0_floor)
             print("Estimated global spike weight:", float(pi0_global))
@@ -85,6 +87,7 @@ def main(args):
             se_hat,
             alpha_er=args.alpha_er,
         )
+        em_pi_k, em_sigma_k = pi_slabs, slab_scales
         print("Estimated spike weight:", float(pi0))
         #print("Sum pi:", float(pi0 + pi_slabs.sum()))
 
@@ -93,6 +96,17 @@ def main(args):
 
     else:
         raise ValueError("args.prior must be 'sf' or 'er'.")
+
+    slab_width = None
+    if args.slab_width != "none":
+        if args.slab_width == "em":
+            if em_pi_k is None:               # SF with --sf_anchor none skips the EM
+                w, se_hat = load_R_and_SE_hat(Rhat_path, SE_hat_path)
+                _, em_pi_k, em_sigma_k = empirical_bayes_em(w, se_hat, alpha_er=args.alpha_er)
+            slab_width = em_slab_scale(em_pi_k, em_sigma_k)
+        else:
+            slab_width = float(args.slab_width)
+        print(f"Regularised horseshoe, slab width {slab_width:.4f}")
 
     U_lower = jnp.linalg.cholesky(jnp.array(U_mat.values))
     V_lower = jnp.linalg.cholesky(jnp.array(V_mat.values))
@@ -141,11 +155,23 @@ def main(args):
         rho_sigma=args.rho_sigma,
         rho_barrier_start=args.rho_barrier_start,
         rho_barrier_width=args.rho_barrier_width,
+        slab_width=slab_width,
     )
 
     init_params, init_info = None, None
-    if args.init_strategy in ("optimized", "rhat"):
+    if args.init_strategy in ("optimized", "rhat", "file"):
         start_G = None
+        if args.init_strategy == "file":
+            if not args.init_G:
+                raise ValueError("--init_strategy file needs --init_G")
+            gdf = pd.read_csv(args.init_G)
+            if gdf.shape[1] == D + 1:          # written with a row index
+                gdf = pd.read_csv(args.init_G, index_col=0)
+            start_G = gdf.values.astype(float)
+            if start_G.shape != (D, D):
+                raise ValueError(f"--init_G is {start_G.shape}, expected ({D}, {D})")
+            np.fill_diagonal(start_G, 0.0)
+            print(f"4a) Starting from {args.init_G}...")
         if args.init_strategy == "rhat":
             # the total effects soft-thresholded at init_rhat_k standard errors
             start_G = rhat_start(Rhat_df.values, pd.read_csv(SE_hat_path).values,
@@ -245,6 +271,9 @@ def main(args):
             "init_opt_lr": args.init_opt_lr if args.init_strategy != "median" else None,
             "init_jitter": args.init_jitter if args.init_strategy != "median" else None,
             "init_rhat_k": args.init_rhat_k if args.init_strategy == "rhat" else None,
+            "init_G": args.init_G if args.init_strategy == "file" else None,
+            "slab_width": args.slab_width,
+            "slab_width_value": slab_width,
         }
         if init_info is not None:
             diagnostics["init"] = init_info
@@ -517,7 +546,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--init_strategy",
-        choices=["median", "optimized", "rhat"],
+        choices=["median", "optimized", "rhat", "file"],
         default="optimized",
         help=(
             "Where NUTS starts. 'median' is init_to_median(num_samples=50), an "
@@ -526,8 +555,9 @@ if __name__ == "__main__":
             "--init_opt_steps Adam steps on the log posterior first. 'rhat' "
             "starts the same descent from R_hat soft-thresholded at "
             "--init_rhat_k standard errors instead, which at D = 500 lands near "
-            "the optimum the empty start misses. The posterior is unchanged in "
-            "every case. Default optimized."
+            "the optimum the empty start misses. 'file' starts it from the G in "
+            "--init_G, e.g. the true G in a simulation. The posterior is "
+            "unchanged in every case. Default optimized."
         ),
     )
 
@@ -537,6 +567,23 @@ if __name__ == "__main__":
         default=2000,
         help=("Adam steps for --init_strategy optimized or rhat; 0 starts NUTS "
               "at the (jittered) start itself. Default 2000."),
+    )
+
+    parser.add_argument(
+        "--init_G",
+        default=None,
+        help="D x D CSV of G to start from, for --init_strategy file.",
+    )
+
+    parser.add_argument(
+        "--slab_width",
+        default="none",
+        help=(
+            "'none' for the horseshoe as published; 'em' for the regularised "
+            "horseshoe with its slab width set to the RMS scale of the EM's "
+            "fitted slab; or a number. The regularised slab's tail beyond the "
+            "width is Gaussian rather than Cauchy. Default none."
+        ),
     )
 
     parser.add_argument(
