@@ -36,6 +36,7 @@ from model import (  # noqa: E402
     optimized_init,
     posterior_diagnostics,
     power_iteration_radius,
+    screen_draws,
     rhat_start,
     rho_log_penalty,
 )
@@ -682,7 +683,7 @@ def test_scale_free_degree_matches_the_cvxpy_program():
 # --------------------------------------------------------------------------
 
 def keep_mask_count(diag):
-    return diag["n_draws_total"] - diag["nonconvergent"]["n"]
+    return diag["n_draws_total"] - diag["excluded"]["n"]
 
 
 def test_posterior_diagnostics_reports_what_the_run_did():
@@ -702,7 +703,8 @@ def test_posterior_diagnostics_reports_what_the_run_did():
 
     d = posterior_diagnostics(draws, rho, keep, extra_fields=extra)
     assert d["n_chains"] == C and d["n_draws_total"] == C * N and d["D"] == D
-    assert d["nonconvergent"]["n"] == 2
+    assert d["excluded"]["n"] == 2                       # what the filter removed
+    assert d["nonconvergent"]["n"] == int((np.asarray(rho) >= 1).sum())   # rho >= 1, kept or not
     assert d["divergences"]["n"] == 4 and d["divergences"]["per_chain"] == [4, 0]
     assert d["leapfrog"]["total"] == C * N * 7
     assert np.isclose(d["step_size"]["median"], 3e-3)
@@ -822,12 +824,12 @@ def _chain_of_dags(n_draws, D, seed):
     return np.stack([_dag(D, seed=seed * 1000 + n) for n in range(n_draws)])[None]
 
 
-def _combine(chain_dirs, out, epsilon=0.05):
+def _combine(chain_dirs, out, epsilon=0.05, max_spectral_radius=None):
     import argparse
     import combine_chains
     combine_chains.main(argparse.Namespace(
         chain_dirs=[str(c) for c in chain_dirs], output_dir=str(out),
-        epsilon=epsilon, seed=42,
+        epsilon=epsilon, seed=42, max_spectral_radius=max_spectral_radius,
     ))
     return {n: pd.read_csv(out / f"{n}.csv", index_col=0)
             for n in ("G", "pip", "lfsr")}, json.load((out / "diagnostics.json").open())
@@ -884,8 +886,40 @@ def test_combine_chains_matches_concatenated_draws():
         assert diag["nonconvergent"]["n"] == 0
 
 
+def _runaway_chains(tmp, D, N):
+    good = [_chain_of_dags(N, D, c) for c in range(2)]
+    bad = _chain_of_dags(N, D, 2).copy()
+    bad[:, :, 0, 1] = 2.0          # a 2-cycle of weight 2 gives rho = 2
+    bad[:, :, 1, 0] = 2.0
+    dirs = [_write_chain(Path(tmp) / f"chain{c}", ch) for c, ch in enumerate(good + [bad])]
+    return good, bad, dirs
+
+
+def test_combine_chains_keeps_every_draw_by_default():
+    """Without --max_spectral_radius nothing is excluded; rho >= 1 is reported."""
+    D, N = 6, 5
+    with tempfile.TemporaryDirectory() as tmp:
+        good, bad, dirs = _runaway_chains(tmp, D, N)
+        out, diag = _combine(dirs, Path(tmp) / "combined")
+        assert diag["excluded"]["n"] == 0
+        assert diag["nonconvergent"]["per_chain"] == [0, 0, N]
+        allv = np.concatenate(good + [bad], axis=0).reshape(-1, D, D).astype(np.float32)
+        assert np.allclose(out["G"].values, allv.mean(axis=0), atol=1e-6)
+
+
+def test_screen_draws_keeps_everything_by_default_and_cuts_when_asked():
+    import warnings
+    rho = np.array([0.5, 0.8, 1.5, 3.0, 0.2, 0.9])
+    assert screen_draws(rho, 2).all()
+    assert (screen_draws(rho, 2, max_spectral_radius=1.0) == (rho < 1.0)).all()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        screen_draws(np.array([0.5, 12.0]), 1)
+        assert any("exceeds 10" in str(x.message) for x in w)
+
+
 def test_combine_chains_excludes_nonconvergent_draws():
-    """A runaway chain must be dropped from the combined summaries."""
+    """With --max_spectral_radius 1, a runaway chain is dropped from the summaries."""
     D, N = 6, 5
     with tempfile.TemporaryDirectory() as tmp:
         good = [_chain_of_dags(N, D, c) for c in range(2)]
@@ -895,9 +929,10 @@ def test_combine_chains_excludes_nonconvergent_draws():
         assert (np.abs(np.linalg.eigvals(bad[0])).max(axis=1) >= 1).all()
         dirs = [_write_chain(Path(tmp) / f"chain{c}", ch)
                 for c, ch in enumerate(good + [bad])]
-        out, diag = _combine(dirs, Path(tmp) / "combined")
+        out, diag = _combine(dirs, Path(tmp) / "combined", max_spectral_radius=1.0)
 
-        assert diag["nonconvergent"]["n"] == N
+        assert diag["excluded"]["n"] == N
+        assert diag["excluded"]["per_chain"] == [0, 0, N]
         assert diag["nonconvergent"]["per_chain"] == [0, 0, N]
         # the combined mean must use only the two healthy chains
         kept = np.concatenate(good, axis=0).reshape(-1, D, D).astype(np.float32)
@@ -939,6 +974,7 @@ def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
             rho_barrier_start=1.0, rho_barrier_width=0.2,
             init_strategy=init_strategy, init_opt_steps=200, init_opt_lr=0.01,
             init_jitter=0.1, init_rhat_k=3.0, init_G=init_G, slab_width=slab_width,
+            max_spectral_radius=None,
         ))
 
         pip = pd.read_csv(out / "pip.csv", index_col=0)
@@ -978,7 +1014,9 @@ def _check_outputs(keep, pip, G, lfsr, diag):
     assert diag["config"]["seed"] == 42
     assert diag["config"]["target_accept_prob"] == 0.7
     assert diag["config"]["max_tree_depth"] == 10
-    assert diag["nonconvergent"]["n"] + int(keep_mask_count(diag)) == diag["n_draws_total"]
+    assert diag["excluded"]["n"] + int(keep_mask_count(diag)) == diag["n_draws_total"]
+    if diag["config"]["max_spectral_radius"] is None:      # the default keeps every draw
+        assert diag["excluded"]["n"] == 0
 
 
 def test_end_to_end_outputs_are_well_formed():

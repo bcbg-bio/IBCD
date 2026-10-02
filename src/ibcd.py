@@ -19,7 +19,7 @@ from empirical_prior import (
     solve_spike_slab_diagonal_spike,
 )
 from model import (matrix_model_spike_horseshoe, compute_lfsr, convergent_draws,
-                   posterior_diagnostics, optimized_init, rhat_start)
+                   posterior_diagnostics, optimized_init, rhat_start, screen_draws)
 from iv_regression import xi_norm, run_all_IV
 
 
@@ -214,35 +214,13 @@ def main(args):
 
     flat = posterior.reshape(-1, D, D)
 
-    # R = sum_d G^d only exists where rho(G) < 1. Draws outside that region
-    # have crossed the singularity of (I - G) and carry no information about
-    # the graph, so they are excluded from every summary below.
-    keep, rho = convergent_draws(flat)
-    n_total = keep.size
-    n_drop = int((~keep).sum())
-    if n_drop:
-        pct = 100.0 * n_drop / n_total
-        per_chain = (~keep).reshape(posterior.shape[0], -1).sum(axis=1)
-        detail = ", ".join(
-            f"chain {c}: {int(k)}/{keep.size // posterior.shape[0]}"
-            for c, k in enumerate(per_chain)
-        )
-        message = (
-            f"{n_drop} of {n_total} draws ({pct:.1f}%) have spectral radius >= 1 "
-            f"and were excluded ({detail}); max rho = {rho.max():.3g}"
-        )
-        if pct >= 10.0:
-            warnings.warn(
-                message + ". Treat these results with caution: a large "
-                "non-convergent fraction usually means one or more chains "
-                "failed to mix.",
-                RuntimeWarning,
-            )
-        else:
-            print(message)
+    # rho(G) for every draw. By default all draws are kept and rho is only
+    # reported; --max_spectral_radius restores a hard cut. See screen_draws.
+    _, rho = convergent_draws(flat)
+    keep = screen_draws(rho, posterior.shape[0], args.max_spectral_radius)
+
     # Diagnostics are optional: split R-hat and ESS are O(D^2) over the entries
-    # of G, which is the expensive part of this block at large D. Rejection of
-    # non-convergent draws above is not optional, since it changes the outputs.
+    # of G, which is the expensive part of this block at large D.
     if args.save_diagnostics:
         diagnostics = posterior_diagnostics(posterior, rho, keep,
                                             extra_fields=extra, seed=args.seed,
@@ -272,6 +250,7 @@ def main(args):
             "init_jitter": args.init_jitter if args.init_strategy != "median" else None,
             "init_rhat_k": args.init_rhat_k if args.init_strategy == "rhat" else None,
             "init_G": args.init_G if args.init_strategy == "file" else None,
+            "max_spectral_radius": args.max_spectral_radius,
             "slab_width": args.slab_width,
             "slab_width_value": slab_width,
         }
@@ -324,8 +303,8 @@ def main(args):
     # to explain why.
     if not keep.any():
         raise RuntimeError(
-            "Every posterior draw has spectral radius >= 1; the sampler never "
-            "reached the region where the model is defined."
+            f"Every posterior draw has spectral radius >= {args.max_spectral_radius}, "
+            "so --max_spectral_radius excluded them all."
         )
 
     flat = flat[keep]
@@ -547,7 +526,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--init_strategy",
         choices=["median", "optimized", "rhat", "file"],
-        default="optimized",
+        default="rhat",
         help=(
             "Where NUTS starts. 'median' is init_to_median(num_samples=50), an "
             "essentially empty G, from which SF chains at D = 150 left "
@@ -557,7 +536,7 @@ if __name__ == "__main__":
             "--init_rhat_k standard errors instead, which at D = 500 lands near "
             "the optimum the empty start misses. 'file' starts it from the G in "
             "--init_G, e.g. the true G in a simulation. The posterior is "
-            "unchanged in every case. Default optimized."
+            "unchanged in every case. Default rhat."
         ),
     )
 
@@ -570,6 +549,16 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--max_spectral_radius",
+        type=float,
+        default=None,
+        help=("Exclude posterior draws with rho(G) at or above this from G, PIP "
+              "and LFSR. Default: keep every draw and report rho in "
+              "diagnostics.json, warning if any exceeds 10. Earlier versions "
+              "excluded at 1."),
+    )
+
+    parser.add_argument(
         "--init_G",
         default=None,
         help="D x D CSV of G to start from, for --init_strategy file.",
@@ -577,12 +566,14 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--slab_width",
-        default="none",
+        default="em",
         help=(
             "'none' for the horseshoe as published; 'em' for the regularised "
             "horseshoe with its slab width set to the RMS scale of the EM's "
             "fitted slab; or a number. The regularised slab's tail beyond the "
-            "width is Gaussian rather than Cauchy. Default none."
+            "width is Gaussian rather than Cauchy. Without it, the posterior at "
+            "D = 500 runs away to rho in the hundreds from any start, the true G "
+            "included. Default em."
         ),
     )
 

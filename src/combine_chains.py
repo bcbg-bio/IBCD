@@ -23,7 +23,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from model import compute_lfsr, convergent_draws, posterior_diagnostics
+from model import compute_lfsr, convergent_draws, posterior_diagnostics, screen_draws
 
 
 def load_chains(chain_dirs):
@@ -63,28 +63,15 @@ def main(args):
     print(f"Combined {n_chains} chains x {n_draws} draws at D={D}")
 
     flat = posterior.reshape(-1, D, D)
-    keep, rho = convergent_draws(flat)
-    n_drop = int((~keep).sum())
-    if n_drop:
-        pct = 100.0 * n_drop / keep.size
-        per_chain = (~keep).reshape(n_chains, n_draws).sum(axis=1)
-        detail = ", ".join(f"chain {c}: {int(k)}/{n_draws}"
-                           for c, k in enumerate(per_chain))
-        message = (
-            f"{n_drop} of {keep.size} draws ({pct:.1f}%) have spectral radius "
-            f">= 1 and were excluded ({detail}); max rho = {rho.max():.3g}"
-        )
-        if pct >= 10.0:
-            warnings.warn(message + ". Treat these results with caution.",
-                          RuntimeWarning)
-        else:
-            print(message)
+    _, rho = convergent_draws(flat)
+    keep = screen_draws(rho, n_chains, getattr(args, "max_spectral_radius", None))
     if not keep.any():
-        raise RuntimeError("Every draw has spectral radius >= 1.")
+        raise RuntimeError(f"Every draw has spectral radius >= {args.max_spectral_radius}.")
 
     diagnostics = posterior_diagnostics(posterior, rho, keep, seed=args.seed)
     diagnostics["config"] = {"chain_dirs": list(args.chain_dirs),
-                             "epsilon": args.epsilon}
+                             "epsilon": args.epsilon,
+                             "max_spectral_radius": getattr(args, "max_spectral_radius", None)}
     with open(os.path.join(args.output_dir, "diagnostics.json"), "w") as fh:
         json.dump(diagnostics, fh, indent=2)
 
@@ -130,6 +117,8 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon", type=float, default=0.05,
                         help="PIP threshold: edges with |G| > epsilon are "
                              "counted as active. Default = 0.05.")
+    parser.add_argument("--max_spectral_radius", type=float, default=None,
+                        help="Exclude draws with rho(G) at or above this. Default: keep all.")
     parser.add_argument("--seed", type=int, default=42,
                         help="Seed for the ESS subsample. Default = 42.")
     main(parser.parse_args())

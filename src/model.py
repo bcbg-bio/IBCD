@@ -372,6 +372,67 @@ def convergent_draws(G_draws, max_spectral_radius=1.0):
     return rho < max_spectral_radius, rho
 
 
+def screen_draws(rho, n_chains, max_spectral_radius=None, pathological_rho=10.0):
+    """Decide which posterior draws to keep, and report on their spectral radius.
+
+    R = sum_d G^d only converges for rho(G) < 1, but the model computes R as
+    (I - G)^-1, which is defined for any G without an eigenvalue at 1. At
+    D = 500 the posterior with the slab width sits at rho ~3-4 with bounded
+    entries and clean sampling, and its mean is the most accurate estimate
+    available, so by default every draw is kept and rho is only reported.
+    `max_spectral_radius` restores a hard cut: draws with rho at or above it
+    are excluded, as the pipeline used to do at 1.
+
+    A note is printed when draws have rho >= 1 (R is then not a convergent path
+    sum for them), and a RuntimeWarning raised when any exceeds
+    `pathological_rho`, which flags a runaway like the horseshoe's at D = 500
+    (rho in the hundreds, |G| up to 1e4).
+
+    Args:
+        rho (np.ndarray): Spectral radius of each flattened draw.
+        n_chains (int): Number of chains the draws come from, chain-major.
+        max_spectral_radius (float): None to keep every draw, otherwise the
+            exclusive upper bound on rho for a draw to be kept.
+        pathological_rho (float): rho above which a warning is raised.
+
+    Returns:
+        np.ndarray: Boolean mask over the flattened draws.
+    """
+    import warnings
+    rho = np.asarray(rho)
+    n = rho.size
+    per_chain = n // n_chains
+    keep = np.ones(n, dtype=bool) if max_spectral_radius is None else rho < max_spectral_radius
+
+    def by_chain(mask):
+        counts = mask.reshape(n_chains, -1).sum(axis=1)
+        return ", ".join(f"chain {c}: {int(k)}/{per_chain}" for c, k in enumerate(counts))
+
+    ge1 = rho >= 1.0
+    if ge1.any() and max_spectral_radius is None:
+        print(f"{int(ge1.sum())} of {n} draws ({100 * ge1.mean():.1f}%) have spectral "
+              f"radius >= 1 ({by_chain(ge1)}); median rho {np.median(rho):.3g}, max "
+              f"{rho.max():.3g}. They are kept (--max_spectral_radius not set); for "
+              "them R = (I - G)^-1 is not a convergent path sum.")
+    n_drop = int((~keep).sum())
+    if n_drop:
+        pct = 100.0 * n_drop / n
+        message = (f"{n_drop} of {n} draws ({pct:.1f}%) have spectral radius >= "
+                   f"{max_spectral_radius} and were excluded ({by_chain(~keep)}); "
+                   f"max rho = {rho.max():.3g}")
+        if pct >= 10.0:
+            warnings.warn(message + ". Treat these results with caution: a large "
+                          "excluded fraction usually means one or more chains "
+                          "failed to mix.", RuntimeWarning)
+        else:
+            print(message)
+    if rho.max() > pathological_rho:
+        warnings.warn(f"max spectral radius {rho.max():.3g} exceeds {pathological_rho}; "
+                      "the posterior has likely run away from plausible graphs "
+                      "(see spectral_radius in diagnostics.json).", RuntimeWarning)
+    return keep
+
+
 def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
                           max_ess_entries=5000, seed=0, max_tree_depth=12,
                           max_rhat_entries=20000):
@@ -411,13 +472,13 @@ def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
         "D": int(D),
     }
 
-    # draws outside the region where R = sum_d G^d converges
-    per_chain = (~keep).reshape(n_chains, n_draws).sum(axis=1)
-    out["nonconvergent"] = {
-        "n": int((~keep).sum()),
-        "pct": float(100.0 * (~keep).mean()),
-        "per_chain": [int(x) for x in per_chain],
-    }
+    # draws outside the region where R = sum_d G^d converges, whether or not
+    # they were kept, and separately the draws the filter excluded (if any)
+    def count(mask):
+        return {"n": int(mask.sum()), "pct": float(100.0 * mask.mean()),
+                "per_chain": [int(x) for x in mask.reshape(n_chains, n_draws).sum(axis=1)]}
+    out["nonconvergent"] = count(rho >= 1.0)
+    out["excluded"] = count(~keep)
     out["spectral_radius"] = {
         k: float(v) for k, v in zip(
             ["min", "median", "p95", "p99", "max"],

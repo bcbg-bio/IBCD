@@ -54,8 +54,10 @@ ARM=${ARMS[$(( i / 3 ))]}
 
 SIM_DIR="$DATA_ROOT/${D}d/${N_INT}/${GRAPH}/${SEED}"
 case "$ARM" in
-    truth)        ARM_FLAGS=(--init_strategy file --init_G "$SIM_DIR/G_matrix.csv") ;;
-    rhat_barrier) ARM_FLAGS=(--init_strategy rhat --rho_penalty barrier --rho_estimator gelfand) ;;
+    # truth and rhat_barrier test the published horseshoe, so they pin
+    # --slab_width none now that the default is em
+    truth)        ARM_FLAGS=(--init_strategy file --init_G "$SIM_DIR/G_matrix.csv" --slab_width none) ;;
+    rhat_barrier) ARM_FLAGS=(--init_strategy rhat --rho_penalty barrier --rho_estimator gelfand --slab_width none) ;;
     rhat_slab)    ARM_FLAGS=(--init_strategy rhat --slab_width em) ;;
     *)            echo "unknown arm '$ARM'" >&2; exit 1 ;;
 esac
