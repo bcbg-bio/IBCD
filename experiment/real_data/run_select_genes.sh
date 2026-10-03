@@ -6,10 +6,10 @@
 #
 # Needs hdf5r and dplyr in your R library:
 #
-#   module load R/4.5 && Rscript -e 'options(repos = c(CRAN = "https://cloud.r-project.org")); install.packages(c("hdf5r", "dplyr"))'
+#   module load R/4.5 hdf5/1.12.1 && Rscript -e 'options(repos = c(CRAN = "https://cloud.r-project.org")); install.packages(c("hdf5r", "dplyr"))'
 #
-# hdf5r compiles against the system HDF5 library; if its install fails, load
-# an hdf5 module first.
+# hdf5r links against the HDF5 library, which is not loaded by default, so the
+# hdf5 module is needed both to install it and to run.
 #
 # Memory: the GWPS non-targeting cells are held in memory (all genes x control
 # cells), a few GB; the request below leaves room. -M/rusage units depend on
@@ -27,6 +27,7 @@
 #BSUB -e logs/ibcd_select_genes.err
 
 module load R/4.5
+module load hdf5/1.12.1
 
 DATA="$PROJECT/datasets/perturb_seq"
 OUT="$PROJECT/IBCD_results/real_data/genes"
