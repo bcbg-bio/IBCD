@@ -2,8 +2,9 @@
 #
 # Select the genes for the K562 Perturb-seq analysis (paper Appendix D.3).
 #
-# A gene is kept if, in BOTH the essential and the genome-wide (GWPS) screens,
-#   - its best guide lowers the gene's own normalised expression by more than
+# A gene is kept if the same guide is its best (smallest adjusted p-value) in
+# BOTH the essential and the genome-wide (GWPS) screens, and in both
+#   - that guide lowers the gene's own normalised expression by more than
 #     0.75 standard deviations (inst_beta < -0.75), and
 #   - more than 50 cells carry that guide (n > n_ntc + 50, where n counts the
 #     non-targeting control cells plus the guide's cells),
@@ -26,7 +27,8 @@
 #   guide_effects_essential.csv, guide_effects_gwps.csv   best guide per target
 #   kept_essential.csv, kept_gwps.csv                     targets passing both filters
 #   common_genes.csv                                      column common_genes: the
-#                                                         intersection, the input
+#                                                         guides kept in both
+#                                                         screens, the input
 #                                                         preprocess_screen.R reads
 
 suppressMessages({library(hdf5r); library(dplyr)})
@@ -136,8 +138,13 @@ select_screen <- function(screen, path) {
 res <- lapply(names(files), function(s) select_screen(s, files[[s]]))
 names(res) <- names(files)
 
-common <- intersect(res$essential$kept$target, res$gwps$kept$target)
-common <- res$essential$var_order[res$essential$var_order %in% common]   # essential screen's gene order
+# Intersect on the guide, not the gene: a gene is kept only if the same guide
+# is its best in both screens. This reproduces the published 521 exactly;
+# intersecting on genes adds RPL13A, whose best guide differs between screens.
+common <- intersect(res$essential$kept$inst_id, res$gwps$kept$inst_id)
+guide_of <- setNames(res$essential$kept$inst_id, res$essential$kept$target)
+order <- res$essential$var_order[res$essential$var_order %in% names(guide_of)]   # essential screen's gene order
+common <- unname(guide_of[order][guide_of[order] %in% common])
 write.csv(data.frame(common_genes = common), file.path(out_dir, "common_genes.csv"), row.names = FALSE)
 ts("essential kept ", nrow(res$essential$kept), ", gwps kept ", nrow(res$gwps$kept),
-   ", in both: ", length(common), " (the paper reports 521)")
+   ", same guide kept in both: ", length(common), " (the paper reports 521)")
