@@ -243,7 +243,7 @@ def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0
                                  epsilon=1e-5, truncated_series=False, series_order=24,
                                  rho_penalty=None, rho_estimator="power", rho_sigma=0.5,
                                  rho_barrier_start=1.0, rho_barrier_width=0.2,
-                                 slab_width=None):
+                                 slab_width=None, mvn_factor=None, mvn_diag=None):
     """
     NumPyro model: Spike-and-horseshoe prior over matrix G, MatrixNormal likelihood.
 
@@ -279,6 +279,11 @@ def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0
             large lam, but its tail beyond c is Gaussian rather than Cauchy.
             The horseshoe's tail falls only as tau / t, so at D = 500 a prior
             draw has ~350 entries with |G| > 1.
+        mvn_factor (array): None for the matrix-normal likelihood. Otherwise
+            the Table 7 ablation: vec(R_hat) ~ N(vec(R), F F^T + diag(mvn_diag))
+            with F the D^2 x r factor of a truncated eigendecomposition of the
+            full covariance S (equation 9); U_lower and V_lower are unused.
+        mvn_diag (array): Diagonal added to F F^T, length D^2.
     """
 
     # Sample horseshoe local scales (HalfCauchy), shape (D, D)
@@ -338,6 +343,15 @@ def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0
     else:
         I_minus_G = I - G + epsilon * I
         R_mean = jnp.linalg.solve(I_minus_G, I)
+
+    if mvn_factor is not None:
+        numpyro.sample(
+            "R_hat_obs",
+            dist.LowRankMultivariateNormal(loc=R_mean.reshape(-1),
+                                           cov_factor=mvn_factor, cov_diag=mvn_diag),
+            obs=obs_data[:D, :D].reshape(-1),
+        )
+        return
 
     # MatrixNormal likelihood
     numpyro.sample(

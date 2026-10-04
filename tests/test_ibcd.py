@@ -437,6 +437,75 @@ def test_model_log_density_is_finite_under_each_rho_penalty():
         assert all(np.isfinite(np.asarray(v)).all() for v in grads.values()), (pen, est)
 
 
+def _iv_data(D=6, n_int=400, seed=5):
+    """Interventional data from a small DAG, centred and scaled on the controls."""
+    rng = np.random.default_rng(seed)
+    G = np.triu(rng.normal(0, 0.3, (D, D)) * (rng.random((D, D)) < 0.5), 1)
+    n_c = D * n_int
+    targets = ["control"] * n_c + [f"V{i + 1}" for i in range(D) for _ in range(n_int)]
+    E = rng.normal(size=(len(targets), D))
+    for k, t in enumerate(targets):
+        if t != "control":
+            E[k, int(t[1:]) - 1] -= 2.0
+    Y = E @ np.linalg.inv(np.eye(D) - G)
+    Y = (Y - Y[:n_c].mean(0)) / Y[:n_c].std(0)
+    df = pd.DataFrame(Y, columns=[f"V{i + 1}" for i in range(D)])
+    df["target"] = targets
+    return df
+
+
+def test_compute_S_hat_agrees_with_the_matrix_normal_blocks():
+    from iv_regression import compute_S_hat, multiple_iv_reg_UV
+    df = _iv_data()
+    cols = [c for c in df.columns if c != "target"]
+    D = len(cols)
+    R, U, V = np.zeros((D, D)), np.zeros(D), np.zeros((D, D, D))
+    for i, g in enumerate(cols):
+        r = multiple_iv_reg_UV(g, df[cols], df["target"].tolist())
+        R[i] = [r["beta_se"][f"{c}_beta_hat"] for c in cols]
+        U[i] = r["U_i"]
+        V[i] = r["V_hat"]          # target i's own residual covariance
+    S = compute_S_hat(df, R)
+    assert S.shape == (D * D, D * D)
+    assert np.allclose(S, S.T)
+    assert np.linalg.eigvalsh(S).min() > -1e-12
+    S4 = S.reshape(D, D, D, D)
+    off = ~np.eye(D, dtype=bool)
+    for i in range(D):
+        # the i = k block is U_i V_i, up to the residuals' sample sets
+        ratio = np.diag(S4[i, :, i, :])[off[i]] / (U[i] * np.diag(V[i])[off[i]])
+        assert np.all(np.abs(ratio - 1) < 0.15), (i, ratio)
+    # i != k blocks come only from the first stages' overlap, which shrinks as
+    # p / (1 - p) with p each target's share of the cells (1/12 here)
+    cross = np.abs(S4.transpose(0, 2, 1, 3)[off]).mean()
+    p_i = 1 / (2 * D)
+    assert cross < 1.5 * p_i / (1 - p_i) * np.abs(np.array([S4[i, :, i, :] for i in range(D)])).mean()
+
+
+def test_model_log_density_is_finite_with_the_mvn_likelihood():
+    import jax
+    import jax.numpy as jnp
+    from numpyro.infer.util import initialize_model
+    D = 5
+    rng = np.random.default_rng(4)
+    A = rng.normal(size=(D * D, D * D))
+    lam, Q = np.linalg.eigh(A @ A.T / D ** 2)
+    kw = dict(obs_data=np.eye(D) + rng.normal(0, 0.05, (D, D)),
+              pi0_ij=np.full((D, D), 0.8), U_lower=jnp.eye(D) * 0.1,
+              V_lower=jnp.eye(D), D=D,
+              mvn_factor=jnp.array(Q[:, -3:] * np.sqrt(lam[-3:])),
+              mvn_diag=jnp.full(D * D, 1e-5))
+    info = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=kw)
+    z = info.param_info.z
+    assert np.isfinite(float(info.potential_fn(z)))
+    grads = jax.grad(info.potential_fn)(z)
+    assert all(np.isfinite(np.asarray(v)).all() for v in grads.values())
+    # the likelihood term changes with it: not silently the matrix normal
+    kw_mn = {k: v for k, v in kw.items() if not k.startswith("mvn")}
+    info_mn = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=kw_mn)
+    assert float(info.potential_fn(z)) != float(info_mn.potential_fn(z))
+
+
 def _small_model_kwargs(D=6, seed=3):
     import jax.numpy as jnp
     rng = np.random.default_rng(seed)

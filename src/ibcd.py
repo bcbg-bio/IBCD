@@ -20,7 +20,7 @@ from empirical_prior import (
 )
 from model import (matrix_model_spike_horseshoe, compute_lfsr, convergent_draws,
                    posterior_diagnostics, optimized_init, rhat_start, screen_draws)
-from iv_regression import xi_norm, run_all_IV
+from iv_regression import xi_norm, run_all_IV, compute_S_hat
 
 
 def main(args):
@@ -50,6 +50,8 @@ def main(args):
     D = xi.shape[0]
 
     em_pi_k = em_sigma_k = None          # the EM's slab fit, if it is run
+    if (args.oracle_G or args.global_prior) and args.prior.lower() != "er":
+        raise ValueError("--oracle_G and --global_prior are ablations of the ER prior; use --prior er")
     if args.prior.lower() == "sf":
         # -------- Scale-free (SF) prior --------
         print("2) Using SF prior (Scale-Free)...")
@@ -90,9 +92,20 @@ def main(args):
         em_pi_k, em_sigma_k = pi_slabs, slab_scales
         print("Estimated spike weight:", float(pi0))
         #print("Sum pi:", float(pi0 + pi_slabs.sum()))
+        if args.oracle_G:
+            # Appendix E: the spike weight is the true graph's share of zeros
+            G_true = pd.read_csv(args.oracle_G).values.astype(float)
+            off = ~np.eye(G_true.shape[0], dtype=bool)
+            pi0 = float(np.mean(np.abs(G_true[off]) < 1e-8))
+            print("Oracle spike weight from the true graph:", pi0)
 
-        print("3) Running edge specific weights for ER...")
-        pi0_ij, pi_k_ij, _ = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
+        if args.global_prior:
+            # Table 7's global prior: one spike weight for every edge
+            print("3) Global prior: the same spike weight for every edge...")
+            pi0_ij = np.full((D, D), float(pi0))
+        else:
+            print("3) Running edge specific weights for ER...")
+            pi0_ij, pi_k_ij, _ = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
 
     else:
         raise ValueError("args.prior must be 'sf' or 'er'.")
@@ -157,6 +170,18 @@ def main(args):
         rho_barrier_width=args.rho_barrier_width,
         slab_width=slab_width,
     )
+
+    if args.likelihood == "mvn":
+        # Table 7 ablation: the full covariance of vec(R_hat) (equation 9),
+        # truncated to its top --mvn_rank eigenpairs plus a small diagonal
+        S = compute_S_hat(df, Rhat_df.values)
+        lam_S, Q_S = np.linalg.eigh(S)
+        top = np.argsort(lam_S)[::-1][:args.mvn_rank]
+        model_kwargs["mvn_factor"] = jnp.array(Q_S[:, top] * np.sqrt(np.maximum(lam_S[top], 0.0)))
+        model_kwargs["mvn_diag"] = jnp.full(D * D, args.mvn_jitter)
+        print(f"Multivariate-normal likelihood: rank {args.mvn_rank} of S "
+              f"({lam_S[top].sum() / lam_S.clip(min=0).sum():.1%} of its trace) "
+              f"plus {args.mvn_jitter:g} on the diagonal")
 
     init_params, init_info = None, None
     if args.init_strategy in ("optimized", "rhat", "file"):
@@ -253,6 +278,11 @@ def main(args):
             "max_spectral_radius": args.max_spectral_radius,
             "slab_width": args.slab_width,
             "slab_width_value": slab_width,
+            "oracle_G": args.oracle_G,
+            "global_prior": bool(args.global_prior),
+            "likelihood": args.likelihood,
+            "mvn_rank": args.mvn_rank if args.likelihood == "mvn" else None,
+            "mvn_jitter": args.mvn_jitter if args.likelihood == "mvn" else None,
         }
         if init_info is not None:
             diagnostics["init"] = init_info
@@ -609,6 +639,46 @@ if __name__ == "__main__":
             "Threshold for computing PIP: edges with |G| > epsilon are counted as active. "
             "Default = 0.05."
         ),
+    )
+
+    parser.add_argument(
+        "--oracle_G",
+        default=None,
+        help=("Ablation (Table 7, Appendix E): CSV of the true G; the ER prior's "
+              "spike weight is set to its share of zero off-diagonal entries "
+              "instead of the EM estimate. ER prior only."),
+    )
+
+    parser.add_argument(
+        "--global_prior",
+        action="store_true",
+        help=("Ablation (Table 7): give every edge the EM's global spike weight "
+              "instead of the edge-specific weights. ER prior only."),
+    )
+
+    parser.add_argument(
+        "--likelihood",
+        choices=["mn", "mvn"],
+        default="mn",
+        help=("'mn' is the matrix-normal likelihood. 'mvn' is the Table 7 "
+              "ablation: a multivariate normal on vec(R_hat) whose covariance is "
+              "the full covariance S of equation 9 truncated to its top "
+              "--mvn_rank components. S is D^2 x D^2, so small D only. Default mn."),
+    )
+
+    parser.add_argument(
+        "--mvn_rank",
+        type=int,
+        default=10,
+        help="Components of S kept for --likelihood mvn. Default 10, as in the paper.",
+    )
+
+    parser.add_argument(
+        "--mvn_jitter",
+        type=float,
+        default=1e-5,
+        help=("Diagonal added to the truncated S for --likelihood mvn, which is "
+              "otherwise singular. Default 1e-5."),
     )
 
     args = parser.parse_args()

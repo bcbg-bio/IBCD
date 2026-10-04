@@ -27,7 +27,20 @@
 #
 #   Rscript generate_sim_data.R --out_dir DIR [--dims 50,150,250,500]
 #       [--graphs er,sf] [--n_int 100] [--seeds 42:51] [--shuffle false]
-#       [--write_iv true]
+#       [--write_iv true] [--int_beta -2] [--v 0.25]
+#       [--net_vars none] [--min_v none]
+#
+# --int_beta and --v set the intervention strength and the edge-weight mode
+# (Appendix D.1: -2 and 0.25; the ablations use -1.5 and 0.2).
+#
+# --net_vars and --min_v give the reduced-R^2-sortability SF graphs of
+# Appendix F.2, through inspre's own options of the same names: each node's
+# incoming variance explained is first set to net_vars, then every edge is
+# reweighted by 1/sqrt(a_i a_j), a being a node's total incoming plus outgoing
+# variance explained, and rescaled to the original mean; edges below min_v are
+# then dropped (Table 4; omitted for Table 3). The paper used net_vars 0.4 at
+# D = 50 and 0.5 at D = 250, and min_v = v/2 = 0.125. Both default to none,
+# which leaves the data unchanged.
 #
 #
 # Node order
@@ -77,6 +90,9 @@ shuffle  <- parse_bool(get_arg(args, "--shuffle", "false"))
 write_iv <- parse_bool(get_arg(args, "--write_iv", "true"))
 int_beta <- as.numeric(get_arg(args, "--int_beta", "-2"))
 v_edge   <- as.numeric(get_arg(args, "--v", "0.25"))
+parse_opt_num <- function(s) if (tolower(s) == "none") NULL else as.numeric(s)
+net_vars <- parse_opt_num(get_arg(args, "--net_vars", "none"))
+min_v    <- parse_opt_num(get_arg(args, "--min_v", "none"))
 
 stopifnot(all(graphs %in% c("er", "sf")))
 
@@ -138,7 +154,8 @@ run_one <- function(D, n_int, graph, seed, dir_out) {
   ds <- generate_dataset(
     D = D, N_cont = D * n_int, N_int = n_int, int_beta = int_beta,
     graph = INSPRE_GRAPH[[graph]],     # passed explicitly; never defaulted
-    v = v_edge, p = p, DAG = TRUE, C = 0
+    v = v_edge, p = p, DAG = TRUE, C = 0,
+    net_vars = net_vars, min_v = min_v
   )
   Y <- ds$Y; G <- ds$G; R <- ds$R; targets <- ds$targets
 
@@ -187,6 +204,9 @@ message(sprintf("out_dir=%s | dims=%s | graphs=%s | n_int=%s | seeds=%s | shuffl
                 out_dir, paste(dims, collapse = ","), paste(graphs, collapse = ","),
                 paste(n_ints, collapse = ","),
                 paste(range(seeds), collapse = ":"), shuffle))
+message(sprintf("int_beta=%g | v=%g | net_vars=%s | min_v=%s", int_beta, v_edge,
+                if (is.null(net_vars)) "none" else net_vars,
+                if (is.null(min_v)) "none" else min_v))
 
 for (D in dims) {
   for (n_int in n_ints) {

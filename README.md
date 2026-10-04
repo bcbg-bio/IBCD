@@ -90,7 +90,8 @@ usage: ibcd.py [-h] --data DATA --prior {sf,er} --output_dir OUTPUT_DIR [--sf_an
                [--init_strategy {median,optimized,rhat,file}] [--init_opt_steps INIT_OPT_STEPS]
                [--max_spectral_radius MAX_SPECTRAL_RADIUS] [--init_G INIT_G] [--slab_width SLAB_WIDTH]
                [--init_rhat_k INIT_RHAT_K] [--init_opt_lr INIT_OPT_LR] [--init_jitter INIT_JITTER]
-               [--epsilon EPSILON]
+               [--epsilon EPSILON] [--oracle_G ORACLE_G] [--global_prior] [--likelihood {mn,mvn}]
+               [--mvn_rank MVN_RANK] [--mvn_jitter MVN_JITTER]
 
 IBCD pipeline. 1) Load data.csv (observation + intervention) 2) Run 2SLS 3) Choose SF (scale-free) or ER
 (Erdős–Rényi) empirical prior 4) Fit empirical Bayesian spike-and-slab prior on matrix normal model 5)
@@ -189,5 +190,19 @@ options:
                         point. Default 0.1.
   --epsilon EPSILON     Threshold for computing PIP: edges with |G| > epsilon are counted as active. Default
                         = 0.05.
+  --oracle_G ORACLE_G   Ablation (Table 7, Appendix E): CSV of the true G; the ER prior's spike weight is
+                        set to its share of zero off-diagonal entries instead of the EM estimate. ER prior
+                        only.
+  --global_prior        Ablation (Table 7): give every edge the EM's global spike weight instead of the
+                        edge-specific weights. ER prior only.
+  --likelihood {mn,mvn}
+                        'mn' is the matrix-normal likelihood. 'mvn' is the Table 7 ablation: a multivariate
+                        normal on vec(R_hat) whose covariance is the full covariance S of equation 9
+                        truncated to its top --mvn_rank components. S is D^2 x D^2, so small D only. Default
+                        mn.
+  --mvn_rank MVN_RANK   Components of S kept for --likelihood mvn. Default 10, as in the paper.
+  --mvn_jitter MVN_JITTER
+                        Diagonal added to the truncated S for --likelihood mvn, which is otherwise singular.
+                        Default 1e-5.
 ```
 
