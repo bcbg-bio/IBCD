@@ -7,12 +7,21 @@
 #   split   train        all cells           -> Figure 8 (essential vs GWPS)
 #           train_fold1-5  80% CV training sets -> Figure 5 and Table 2 (fold pairs)
 #
-# 2 x 2 x 6 = 24 array elements, at D = 521 each about as costly as one D = 500
-# run of the Figure 2 sweep. Inputs are the files run_preprocess.sh writes;
+# 2 x 2 x 6 = 24 array elements. With the EM-anchored SF prior each takes about
+# 14.5 h (26 s per iteration), about 5x a D = 500 run of the Figure 2 sweep:
+# on these screens the EM puts about 2/3 of R_hat in the slab, so both priors
+# are close to dense. Inputs are the files run_preprocess.sh writes;
 # sampler settings are the defaults, as in the sweeps, and are recorded in each
 # run's diagnostics.json. Analyse with pip_agreement.py once all are done.
 #
 # Disk: each G_draws.npy is about 3.3 GB, so about 80 GB in all.
+#
+# SF_ANCHOR selects the SF prior's sparsity level (ibcd.py --sf_anchor): em,
+# the default, or none, the published max-normalisation. none writes to a
+# separate directory (ibcd_sfnone/). It has no effect on ER tasks, so
+# submit only the SF ones, e.g.
+#
+#   SF_ANCHOR=none bsub -J "IBCDreal[1-6,13-18]" < run_ibcd_real.sh
 #
 #   mkdir -p logs && bsub < run_ibcd_real.sh
 
@@ -41,7 +50,10 @@ PRIOR=${PRIORS[$(( (i / 6) % 2 ))]}
 SCREEN=${SCREENS[$(( i / 12 ))]}
 
 DATA_FILE="$ROOT/$SCREEN/input/Y_matrix_${SCREEN}_${SPLIT}.csv"
-OUT_DIR="$ROOT/ibcd/$SCREEN/$PRIOR/$SPLIT"
+SF_ANCHOR="${SF_ANCHOR:-em}"
+RUN_DIR=ibcd
+[[ $SF_ANCHOR == none ]] && RUN_DIR=ibcd_sfnone
+OUT_DIR="$ROOT/$RUN_DIR/$SCREEN/$PRIOR/$SPLIT"
 
 if [[ ! -f "$DATA_FILE" ]]; then
     echo "missing input: $DATA_FILE" >&2
@@ -50,7 +62,7 @@ if [[ ! -f "$DATA_FILE" ]]; then
 fi
 mkdir -p "$OUT_DIR"
 
-echo "task ${LSB_JOBINDEX}: screen=$SCREEN prior=$PRIOR split=$SPLIT"
+echo "task ${LSB_JOBINDEX} (sf_anchor $SF_ANCHOR): screen=$SCREEN prior=$PRIOR split=$SPLIT"
 echo "  in  $DATA_FILE"
 echo "  out $OUT_DIR"
 echo "CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES:-unset}"
@@ -60,6 +72,7 @@ python "$IBCD" \
     --data "$DATA_FILE" \
     --prior "$PRIOR" \
     --output_dir "$OUT_DIR" \
+    --sf_anchor "$SF_ANCHOR" \
     --save_diagnostics
 
 echo "task ${LSB_JOBINDEX} finished with status $?"
