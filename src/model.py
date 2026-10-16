@@ -50,10 +50,9 @@ def rho_log_penalty(rho, kind, sigma=0.5, start=1.0, width=0.2):
     it, so it leaves the interior alone. The hinge is squared so the gradient
     stays continuous, which NUTS needs.
 
-    The defaults (start 1.0, width 0.2) are deliberately soft. At D = 150 a
-    steeper barrier (0.9, 0.05) left chains that met it early in warmup with
-    a collapsed step size, frozen wherever they were; the softer one lets a
-    draw sit slightly past rho = 1 rather than pinning it there.
+    The defaults (start 1.0, width 0.2) are deliberately soft, so a draw can
+    sit slightly past rho = 1 rather than being pinned there; see NOTES.md,
+    2026-10-01.
     """
     if kind == "gaussian":
         return dist.Normal(0.0, sigma).log_prob(rho)
@@ -73,10 +72,10 @@ def rhat_start(R_hat, se_hat, k=3.0):
     a true edge i -> j, R_ij is nonzero and R_ji is not), and it uses only the
     model's own inputs, with no matrix inversion.
 
-    k matters. A null entry clears one standard error about a third of the time,
-    so at D = 500 k = 1 left ~77,000 spurious entries and ~14,000 pairs in both
-    directions; k = 3 left ~600 and under ten, with 83% of the direct edges
-    present and rho ~ 0.25. Higher k dropped too many true edges.
+    k trades spurious entries against dropped true edges: a null entry clears
+    one standard error about a third of the time, so a small k keeps many
+    spurious entries and pairs in both directions, and a large k drops true
+    edges. See NOTES.md, 2026-10-01, for the choice of k = 3.
 
     Args:
         R_hat (np.ndarray): D x D total-effect estimates.
@@ -140,26 +139,17 @@ def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2
     """Starting points for NUTS from a short optimisation of the log posterior.
 
     From the default start, init_to_median, G is essentially empty and far from
-    R_hat, so the likelihood gradient is steep. At D = 150 on SF graphs every
-    chain started there left rho(G) < 1 within the first 20 warmup iterations
-    and never came back, while chains started at the true G stayed at
-    rho ~ 0.7. Descending the same potential from the same start in many small
-    Adam steps reaches rho ~ 0.6 on every seed tested. The posterior is
-    unchanged; only where the sampler begins is.
-
-    At D = 500 the empty start is not enough: even a slow descent from it finds
-    a wrong graph 3,000-5,500 nats below the optimum near the true G. Passing
-    `start_G` (see rhat_start) begins the descent from the thresholded total
-    effects instead, which lands within ~650-900 nats of it with valid rho.
+    R_hat, so the likelihood gradient is steep. Descending the same potential
+    from the same start in many small Adam steps first moves the chains into
+    a plausible region before NUTS adapts its step size. The posterior is
+    unchanged; only where the sampler begins is. `start_G` (see rhat_start)
+    begins the descent from a given G instead of the empty one.
 
     Uses numpyro.optim.Adam, a wrapper over jax.example_libraries.optimizers,
     so it adds no dependency. Adam moves each coordinate by about lr per step
     whatever the size of its gradient, which is what keeps the descent from
-    overshooting the way an untuned leapfrog step does. At D >= 250 it does not
-    fully settle at lr = 0.01 and the last iterate can sit a few thousand nats
-    above the best one visited, but in the same basin (F1 within 0.005), which
-    is negligible next to the ~3 D^2 / 2 nats NUTS climbs from the mode into
-    the typical set, so the last iterate is returned.
+    overshooting the way an untuned leapfrog step does. The last iterate is
+    returned rather than the best one visited; see NOTES.md, 2026-10-02.
 
     Without `start_G` each chain starts from its own init_to_median draw; with
     it, every chain starts from start_G. The chains end up close together,
@@ -212,10 +202,8 @@ def optimized_init(model, model_kwargs, rng_key, num_chains, steps=2000, lr=1e-2
         one = latents_from_G(start_G, model_kwargs["pi0_ij"], tau,
                              slab_width=model_kwargs.get("slab_width"))
         # every chain descends from start_G itself; the jitter after the
-        # descent separates them. Jittering before it as well put small
-        # nonzero values on the null entries of the hub rows, which Adam at
-        # lr 0.01 grew into cycles: from the true G at D = 500, rho went from
-        # 0.38 to ~3 over 2000 steps, against 0.62 without it.
+        # descent separates them. No jitter before the descent: Adam grows
+        # small values on null entries into cycles; see NOTES.md, 2026-10-02.
         z0 = {name: jnp.broadcast_to(one[name], (num_chains,) + one[name].shape)
               for name in mi.param_info.z}
 
@@ -259,8 +247,8 @@ def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0
             explicit inverse.
         truncated_series (bool): Compute R as a truncated path sum instead of
             inverting (I - G). The sum is a polynomial in G, so it has no pole
-            and bounded gradients, but it costs roughly an order of magnitude
-            more per gradient. Equivalent to the inverse for a DAG once
+            and bounded gradients, but it costs series_order matrix products
+            per evaluation instead of one solve. Equivalent to the inverse for a DAG once
             series_order reaches the longest directed path.
         series_order (int): Highest power retained in the truncated path sum.
             Ignored unless truncated_series is set.
@@ -269,16 +257,15 @@ def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0
             that is zero below rho_barrier_start. See `rho_log_penalty`.
         rho_estimator (str): 'power' (Appendix H's power iteration) or
             'gelfand' (an upper bound). Ignored unless rho_penalty is set.
-        rho_sigma (float): Scale of the Gaussian penalty; 0.5 as on main.
+        rho_sigma (float): Scale of the Gaussian penalty; 0.5 in Appendix H.
         rho_barrier_start (float): Spectral radius where the barrier begins.
         rho_barrier_width (float): Distance over which the barrier costs 1 nat.
         slab_width (float): None for the horseshoe as published. Otherwise a
             regularised horseshoe (Piironen & Vehtari 2017) applied to each
             entry's whole slab scale s = (1 - pi0) tau lam, replaced by
             c s / sqrt(c^2 + s^2): an entry can still reach scale c through a
-            large lam, but its tail beyond c is Gaussian rather than Cauchy.
-            The horseshoe's tail falls only as tau / t, so at D = 500 a prior
-            draw has ~350 entries with |G| > 1.
+            large lam, but its tail beyond c is Gaussian rather than Cauchy,
+            where the horseshoe's tail falls only as tau / t.
         mvn_factor (array): None for the matrix-normal likelihood. Otherwise
             the Table 7 ablation: vec(R_hat) ~ N(vec(R), F F^T + diag(mvn_diag))
             with F the D^2 x r factor of a truncated eigendecomposition of the
@@ -307,9 +294,8 @@ def matrix_model_spike_horseshoe(obs_data, pi0_ij, U_lower, V_lower, D, sigma0=0
     else:
         # Cap each entry's whole slab scale, (1 - pi0) tau lam, at the width.
         # Capping lam alone would cap the entry at (1 - pi0) c, which in rows
-        # the SF prior shrinks hard (1 - pi0 down to ~1e-7) leaves true edges
-        # needing |eps| in the thousands: at D = 500, 57-59% of true edges
-        # would need |eps| > 3. Capping the product keeps the horseshoe's
+        # the SF prior shrinks hard leaves true edges needing a huge |eps|;
+        # see NOTES.md, 2026-10-02. Capping the product keeps the horseshoe's
         # escape hatch (a large lam, at ~2 log lam) up to the width.
         s = (1. - pi0_ij) * tau * lam
         s = slab_width * s / jnp.sqrt(slab_width ** 2 + s ** 2)
@@ -390,17 +376,15 @@ def screen_draws(rho, n_chains, max_spectral_radius=None, pathological_rho=10.0)
     """Decide which posterior draws to keep, and report on their spectral radius.
 
     R = sum_d G^d only converges for rho(G) < 1, but the model computes R as
-    (I - G)^-1, which is defined for any G without an eigenvalue at 1. At
-    D = 500 the posterior with the slab width sits at rho ~3-4 with bounded
-    entries and clean sampling, and its mean is the most accurate estimate
-    available, so by default every draw is kept and rho is only reported.
-    `max_spectral_radius` restores a hard cut: draws with rho at or above it
-    are excluded, as the pipeline used to do at 1.
+    (I - G)^-1, which is defined for any G without an eigenvalue at 1, so by
+    default every draw is kept and rho is only reported; see NOTES.md,
+    2026-10-02. `max_spectral_radius` restores a hard cut: draws with rho at
+    or above it are excluded.
 
     A note is printed when draws have rho >= 1 (R is then not a convergent path
     sum for them), and a RuntimeWarning raised when any exceeds
-    `pathological_rho`, which flags a runaway like the horseshoe's at D = 500
-    (rho in the hundreds, |G| up to 1e4).
+    `pathological_rho`, which flags a posterior that has run away to
+    implausibly large cycles.
 
     Args:
         rho (np.ndarray): Spectral radius of each flattened draw.
@@ -585,7 +569,7 @@ def posterior_diagnostics(G_draws, rho, keep, extra_fields=None,
 
 def compute_lfsr(flat_samples):
     """
-    Compute Local Falscale_free_degree Sign Rate for each edge from posterior samples.
+    Compute Local False Sign Rate for each edge from posterior samples.
 
     Parameters:
         flat_samples (array): Posterior samples of shape (samples, D, D)

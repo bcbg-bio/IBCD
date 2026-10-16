@@ -139,8 +139,8 @@ res <- lapply(names(files), function(s) select_screen(s, files[[s]]))
 names(res) <- names(files)
 
 # Intersect on the guide, not the gene: a gene is kept only if the same guide
-# is its best in both screens. This reproduces the published 521 exactly;
-# intersecting on genes adds RPL13A, whose best guide differs between screens.
+# is its best in both screens, which is the published selection (see
+# NOTES.md, 2026-10-04).
 common <- intersect(res$essential$kept$inst_id, res$gwps$kept$inst_id)
 guide_of <- setNames(res$essential$kept$inst_id, res$essential$kept$target)
 order <- res$essential$var_order[res$essential$var_order %in% names(guide_of)]   # essential screen's gene order

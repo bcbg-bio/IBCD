@@ -4,7 +4,7 @@
 # analysis (paper Section 5 / Appendix D.3). This replaces the original
 # essential-only script, experiment/simulation/data_hdf5.R (removed; see git
 # history), with the paths turned into arguments and the screen name in the
-# output files. The processing is unchanged, and the output is byte-identical:
+# output files. The processing is unchanged (see NOTES.md, 2026-10-03):
 #
 #   1. log1p(counts / core_scale_factor) on Replogle et al.'s raw counts;
 #   2. Seurat S and G2M cell-cycle scores (100 expression-matched control genes

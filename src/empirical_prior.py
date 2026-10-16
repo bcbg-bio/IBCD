@@ -80,6 +80,7 @@ def empirical_bayes_em(w, se_hat, K=50, sigma0=0.001, sigma_min=0.01, sigma_max=
     Returns:
         pi_0 (float): Estimated proportion of the spike component.
         pi_k (jnp.ndarray): Estimated proportions of the slab components.
+        sigma_k (jnp.ndarray): Standard deviations of the slab components.
     """
     N = len(w)
     sigma_k = jnp.linspace(jnp.sqrt(sigma_min), jnp.sqrt(sigma_max), K)
@@ -135,9 +136,9 @@ def em_slab_scale(pi_k, sigma_k):
 
     sqrt(sum_k pi_k sigma_k^2 / sum_k pi_k) over the slab components of
     empirical_bayes_em, excluding the spike. It is fitted to R_hat, the total
-    effects, but in simulation at D = 500 it came out at 0.21-0.24 against a
-    true direct-edge scale of 0.27-0.28, with only 3-6% of the slab weight on
-    the grid's lowest component.
+    effects, and used as the scale of the direct effects G; see NOTES.md,
+    2026-10-02 and 2026-10-06, for how the two compare. It is at least the
+    smallest slab SD on the EM's grid.
     """
     pi_k = np.asarray(pi_k, dtype=float); sigma_k = np.asarray(sigma_k, dtype=float)
     return float(np.sqrt((pi_k * sigma_k ** 2).sum() / pi_k.sum()))
@@ -233,25 +234,25 @@ def scale_free_degree(R, pi0_global=None, pi0_floor=0.05):
     degree. It is not: theta is in units of squared effect size, so the
     overall level it implies is arbitrary.
 
-    Normalising by m = max(theta.max(), phi.max()) supplies units but the
-    wrong ones. It forces the largest node to a budget of D - 1, which is a
-    completely unshrunk row, and because it is a pure ratio the implied mean
-    budget per row grows with D (about 7 at D = 50 and 31 at D = 500) while
-    the true degree stays near 5. It is also invariant to R_hat -> c R_hat,
-    so it cannot distinguish a dense graph from noise.
+    Normalising by m = max(theta.max(), phi.max()), the published method,
+    forces the largest node to a budget of D - 1, a completely unshrunk row.
+    Because it is a pure ratio, the implied mean budget per row depends on how
+    skewed theta is rather than on how dense the graph is, and it is invariant
+    to R_hat -> c R_hat.
 
     With `pi0_global` from the EM of equation 12 the level comes from the
     data instead: the total slab budget is the one equation 18 gives the ER
-    prior, and theta only decides how it is shared out across rows. That is
-    the part theta estimates well; its correlation with the true out-degree
-    is about 0.97. `pi0_floor` bounds any single row's share so no row is
-    ever left entirely unshrunk.
+    prior, and theta only decides how it is shared out across rows. The EM is
+    fitted to the total effects, so this level tracks the density of R_hat,
+    not of G. `pi0_floor` bounds any single row's share so no row is ever
+    left entirely unshrunk. See NOTES.md, 2026-10-05 and 2026-10-06, for how
+    the two levels compare in simulation and on real data.
 
     Args:
         R (np.ndarray): D x D matrix of estimated total causal effects.
         pi0_global (float): Global spike proportion from `empirical_bayes_em`.
-            When None the legacy max-normalisation is used, which is kept only
-            so the published behaviour can be reproduced.
+            When None the published max-normalisation is used
+            (ibcd.py --sf_anchor none).
         pi0_floor (float): Smallest per-node spike proportion, so each row
             keeps at least this much shrinkage.
 

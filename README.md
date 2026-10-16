@@ -137,8 +137,8 @@ options:
                         G.
   --seed SEED           PRNG seed for MCMC. Default = 42.
   --truncated_series    Compute R as a truncated path sum instead of inverting (I - G). The sum has no pole
-                        and bounded gradients, but costs roughly an order of magnitude more per gradient.
-                        Default is the inverse.
+                        and bounded gradients, but costs --series_order matrix products per evaluation
+                        instead of one solve. Default is the inverse.
   --series_order SERIES_ORDER
                         Highest power retained in the truncated path sum for R = sum_d G^d. Exact once it
                         reaches the longest directed path in the graph. Only used with --truncated_series.
@@ -151,7 +151,7 @@ options:
                         How rho is computed for --rho_penalty: 'power' is the Appendix H power iteration (50
                         steps), 'gelfand' an upper bound from ||G^64||^(1/64). Default power.
   --rho_sigma RHO_SIGMA
-                        Scale of the Gaussian rho penalty. Default 0.5, as on main.
+                        Scale of the Gaussian rho penalty. Default 0.5, the Appendix H value.
   --rho_barrier_start RHO_BARRIER_START
                         Spectral radius where the barrier begins. Default 1.0.
   --rho_barrier_width RHO_BARRIER_WIDTH
@@ -159,32 +159,27 @@ options:
                         steeper. Default 0.2.
   --init_strategy {median,optimized,rhat,file}
                         Where NUTS starts. 'median' is init_to_median(num_samples=50), an essentially empty
-                        G, from which SF chains at D = 150 left rho(G) < 1 early in warmup. 'optimized'
-                        starts there and takes --init_opt_steps Adam steps on the log posterior first.
-                        'rhat' starts the same descent from R_hat soft-thresholded at --init_rhat_k standard
-                        errors instead, which at D = 500 lands near the optimum the empty start misses.
-                        'file' starts it from the G in --init_G, e.g. the true G in a simulation. The
-                        posterior is unchanged in every case. Default rhat.
+                        G. 'optimized' starts there and takes --init_opt_steps Adam steps on the log
+                        posterior first. 'rhat' starts the same descent from R_hat soft-thresholded at
+                        --init_rhat_k standard errors instead. 'file' starts it from the G in --init_G, e.g.
+                        the true G in a simulation. The posterior is unchanged in every case. Default rhat.
   --init_opt_steps INIT_OPT_STEPS
                         Adam steps for --init_strategy optimized or rhat; 0 starts NUTS at the (jittered)
                         start itself. Default 2000.
   --max_spectral_radius MAX_SPECTRAL_RADIUS
                         Exclude posterior draws with rho(G) at or above this from G, PIP and LFSR. Default:
                         keep every draw and report rho in diagnostics.json, warning if any exceeds 10.
-                        Earlier versions excluded at 1.
   --init_G INIT_G       D x D CSV of G to start from, for --init_strategy file.
   --slab_width SLAB_WIDTH
                         'none' for the horseshoe as published; 'em' for the regularised horseshoe with its
                         slab width set to the RMS scale of the EM's fitted slab; or a number. The
-                        regularised slab's tail beyond the width is Gaussian rather than Cauchy. Without it,
-                        the posterior at D = 500 runs away to rho in the hundreds from any start, the true G
-                        included. Default em.
+                        regularised slab's tail beyond the width is Gaussian rather than Cauchy. Default em.
   --init_rhat_k INIT_RHAT_K
                         Threshold, in standard errors, for --init_strategy rhat: the start is sign(R_hat) *
                         max(|R_hat| - k * SE, 0). Default 3.
   --init_opt_lr INIT_OPT_LR
-                        Adam learning rate for --init_strategy optimized. Larger values can overshoot rho =
-                        1 on the way down. Default 0.01.
+                        Adam learning rate for the descent before NUTS (--init_strategy optimized, rhat or
+                        file). Default 0.01.
   --init_jitter INIT_JITTER
                         Noise added to log(lam) and eps after optimising, so the chains do not start at one
                         point. Default 0.1.

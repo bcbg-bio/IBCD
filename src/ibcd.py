@@ -492,8 +492,9 @@ if __name__ == "__main__":
         action="store_true",
         help=(
             "Compute R as a truncated path sum instead of inverting (I - G). "
-            "The sum has no pole and bounded gradients, but costs roughly an "
-            "order of magnitude more per gradient. Default is the inverse."
+            "The sum has no pole and bounded gradients, but costs "
+            "--series_order matrix products per evaluation instead of one "
+            "solve. Default is the inverse."
         ),
     )
 
@@ -535,7 +536,7 @@ if __name__ == "__main__":
         "--rho_sigma",
         type=float,
         default=0.5,
-        help="Scale of the Gaussian rho penalty. Default 0.5, as on main.",
+        help="Scale of the Gaussian rho penalty. Default 0.5, the Appendix H value.",
     )
 
     parser.add_argument(
@@ -559,13 +560,11 @@ if __name__ == "__main__":
         default="rhat",
         help=(
             "Where NUTS starts. 'median' is init_to_median(num_samples=50), an "
-            "essentially empty G, from which SF chains at D = 150 left "
-            "rho(G) < 1 early in warmup. 'optimized' starts there and takes "
+            "essentially empty G. 'optimized' starts there and takes "
             "--init_opt_steps Adam steps on the log posterior first. 'rhat' "
             "starts the same descent from R_hat soft-thresholded at "
-            "--init_rhat_k standard errors instead, which at D = 500 lands near "
-            "the optimum the empty start misses. 'file' starts it from the G in "
-            "--init_G, e.g. the true G in a simulation. The posterior is "
+            "--init_rhat_k standard errors instead. 'file' starts it from the G "
+            "in --init_G, e.g. the true G in a simulation. The posterior is "
             "unchanged in every case. Default rhat."
         ),
     )
@@ -584,8 +583,7 @@ if __name__ == "__main__":
         default=None,
         help=("Exclude posterior draws with rho(G) at or above this from G, PIP "
               "and LFSR. Default: keep every draw and report rho in "
-              "diagnostics.json, warning if any exceeds 10. Earlier versions "
-              "excluded at 1."),
+              "diagnostics.json, warning if any exceeds 10."),
     )
 
     parser.add_argument(
@@ -601,9 +599,7 @@ if __name__ == "__main__":
             "'none' for the horseshoe as published; 'em' for the regularised "
             "horseshoe with its slab width set to the RMS scale of the EM's "
             "fitted slab; or a number. The regularised slab's tail beyond the "
-            "width is Gaussian rather than Cauchy. Without it, the posterior at "
-            "D = 500 runs away to rho in the hundreds from any start, the true G "
-            "included. Default em."
+            "width is Gaussian rather than Cauchy. Default em."
         ),
     )
 
@@ -619,8 +615,8 @@ if __name__ == "__main__":
         "--init_opt_lr",
         type=float,
         default=0.01,
-        help=("Adam learning rate for --init_strategy optimized. Larger values "
-              "can overshoot rho = 1 on the way down. Default 0.01."),
+        help=("Adam learning rate for the descent before NUTS (--init_strategy "
+              "optimized, rhat or file). Default 0.01."),
     )
 
     parser.add_argument(

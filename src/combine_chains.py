@@ -11,8 +11,9 @@ Column names are taken from the first directory's `G.csv`.
     python combine_chains.py --chain_dirs out/chain1 out/chain2 out/chain3 \\
                              --output_dir out/combined
 
-Draws whose spectral radius reaches 1 are excluded from every summary, exactly
-as in a single run, and R-hat and ESS are computed across the combined chains.
+Draws are kept or excluded exactly as in a single run (every draw by default;
+`--max_spectral_radius` excludes those at or above it), and R-hat and ESS are
+computed across the combined chains.
 """
 
 import argparse

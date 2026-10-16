@@ -7,10 +7,9 @@
 #   split   train        all cells           -> Figure 8 (essential vs GWPS)
 #           train_fold1-5  80% CV training sets -> Figure 5 and Table 2 (fold pairs)
 #
-# 2 x 2 x 6 = 24 array elements. With the EM-anchored SF prior each takes about
-# 14.5 h (26 s per iteration), about 5x a D = 500 run of the Figure 2 sweep:
-# on these screens the EM puts about 2/3 of R_hat in the slab, so both priors
-# are close to dense. Inputs are the files run_preprocess.sh writes;
+# 2 x 2 x 6 = 24 array elements, each much slower than a D = 500 simulation
+# run (see NOTES.md, 2026-10-06, for timings). Inputs are the files
+# run_preprocess.sh writes;
 # sampler settings are the defaults, as in the sweeps, and are recorded in each
 # run's diagnostics.json. Analyse with pip_agreement.py once all are done.
 #
