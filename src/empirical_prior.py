@@ -144,24 +144,17 @@ def em_slab_scale(pi_k, sigma_k):
     return float(np.sqrt((pi_k * sigma_k ** 2).sum() / pi_k.sum()))
 
 
-def solve_spike_slab_diagonal_spike(
-    xi,
-    pi0,
-    alpha_data=1.0,
-    beta_global=1.0
-):
+def solve_spike_slab_diagonal_spike(xi, pi0):
     """
     Solve for edge-specific spike and slab weights under constraints.
 
     Args:
         xi (np.ndarray): Empirical Bayes statistic matrix (e.g., lfsr or xi scores).
         pi0 (float): Global spike proportion.
-        alpha_data (float): Weight on data residual term.
 
     Returns:
         pi0_ij (np.ndarray): Edge-specific spike weight matrix.
         pi_k_ij (np.ndarray): Edge-specific slab weight matrix.
-        val (float): Optimization objective value.
     """
 
     D = xi.shape[0]
@@ -187,11 +180,7 @@ def solve_spike_slab_diagonal_spike(
     pik_sol[offdiag_mask] = _project_to_budget(xi_norm[offdiag_mask], slab_budget)
     pi0_sol[offdiag_mask] = 1.0 - pik_sol[offdiag_mask]
 
-    # Objective value: with pi0 = 1 - pi_k the two residual terms are equal.
-    resid = pik_sol[offdiag_mask] - xi_norm[offdiag_mask]
-    val = float(alpha_data * 2.0 * np.sum(resid ** 2))
-
-    return pi0_sol, pik_sol, val
+    return pi0_sol, pik_sol
 
 def _cap_and_redistribute(budget, cap, n_iter=100):
     """Clip a budget vector at `cap`, spreading the excess over the rest.

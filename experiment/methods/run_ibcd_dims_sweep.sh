@@ -19,19 +19,6 @@
 # Disk: at D=500 each Y_matrix.csv and Y_with_targets.csv is about 1 GB and
 # each G_draws.npy about 3 GB, so that tier alone needs roughly 100 GB.
 #
-# SF_ANCHOR selects the SF prior's sparsity level (ibcd.py --sf_anchor): em,
-# the default, or none, the published max-normalisation. none writes to a
-# separate directory (inverse_sfnone/). It has no effect on ER tasks, so
-# submit only the SF ones, e.g.
-#
-#   SF_ANCHOR=none bsub -J "IBCDdim[11-20,31-40,51-60,71-80]" < run_ibcd_dims_sweep.sh
-#
-# INIT_STRATEGY sets where NUTS starts (ibcd.py --init_strategy): rhat, the
-# default, or optimized, the empty graph plus the same Adam descent. Anything
-# but rhat appends _init<strategy> to the output directory, e.g.
-#
-#   INIT_STRATEGY=optimized bsub -J "IBCDdim[61-80]" < run_ibcd_dims_sweep.sh
-#
 #   mkdir -p logs && bsub < run_ibcd_dims_sweep.sh
 
 #BSUB -J "IBCDdim[1-80]"
@@ -61,11 +48,7 @@ GRAPH=${GRAPHS[$(( (i / 10) % 2 ))]}
 D=${DIMS[$(( i / 20 ))]}
 
 DATA_FILE="$DATA_ROOT/${D}d/${N_INT}/${GRAPH}/${SEED}/Y_with_targets.csv"
-SF_ANCHOR="${SF_ANCHOR:-em}"
 RUN_DIR=inverse
-[[ $SF_ANCHOR == none ]] && RUN_DIR=inverse_sfnone
-INIT_STRATEGY="${INIT_STRATEGY:-rhat}"
-[[ $INIT_STRATEGY != rhat ]] && RUN_DIR=${RUN_DIR}_init${INIT_STRATEGY}
 OUT_DIR="$OUT_ROOT/$RUN_DIR/${D}d/${N_INT}/${GRAPH}/${SEED}"
 
 if [[ ! -f "$DATA_FILE" ]]; then
@@ -75,7 +58,7 @@ if [[ ! -f "$DATA_FILE" ]]; then
 fi
 mkdir -p "$OUT_DIR"
 
-echo "task ${LSB_JOBINDEX} (sf_anchor $SF_ANCHOR, init $INIT_STRATEGY): D=$D graph=$GRAPH seed=$SEED"
+echo "task ${LSB_JOBINDEX}: D=$D graph=$GRAPH seed=$SEED"
 echo "  in  $DATA_FILE"
 echo "  out $OUT_DIR"
 echo "CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES:-unset}"
@@ -86,8 +69,6 @@ python "$IBCD" \
     --prior "$GRAPH" \
     --output_dir "$OUT_DIR" \
     --seed "$SEED" \
-    --sf_anchor "$SF_ANCHOR" \
-    --init_strategy "$INIT_STRATEGY" \
     --save_diagnostics
 
 echo "task ${LSB_JOBINDEX} finished with status $?"

@@ -9,9 +9,9 @@ of run_ibcd_real.sh:
              thresholded at 0.075 (as experiment/methods/cv_comparison.R on
              main computes them), and the pooled fold-pair PIP correlation.
 
-Only off-diagonal entries are used. Pearson r is reported both on PIP and on
-log10 PIP; a PIP of 0 cannot go on a log axis, so for the log scale (and the
-plots) zeros are set to half the smallest nonzero PIP, 1 / (2 * draws).
+Only off-diagonal entries are used. Pearson r is computed on PIP. The plots
+use log axes; a PIP of 0 cannot go on one, so there zeros are drawn at half
+the smallest nonzero PIP, 1 / (2 * draws).
 
 PIPs come from each run's pip.csv (the epsilon it was run with, 0.05 by
 default) unless --epsilon is given, in which case they are recomputed from
@@ -120,8 +120,7 @@ def scatter_panel(fig, spec, x, y, floor, title, xlabel, ylabel, side_hist):
     ax.set_yticklabels([f"$10^{{{int(t)}}}$" for t in ticks])
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.text(0.03, 0.97, f"Pearson r = {pearson(x, y):.3f} (PIP)\n"
-                        f"Pearson r = {pearson(lx, ly):.3f} (log PIP)",
+    ax.text(0.03, 0.97, f"Pearson r = {pearson(x, y):.3f}",
             transform=ax.transAxes, va="top", fontsize=8)
     top.hist(lx, bins=bins, color="0.5", edgecolor="0.3", linewidth=0.3)
     top.axis("off")
@@ -171,8 +170,7 @@ def main():
                 pj, Gj, _ = runs[screen, prior, fj]
                 f1, shd = fold_pair_metrics(Gi, Gj, args.graph_eps)
                 pair_rows.append(dict(screen=screen, prior=prior, fold_i=fi, fold_j=fj, F1=f1, SHD=shd,
-                                      r_pip=pearson(pi, pj),
-                                      r_log_pip=pearson(log_pip(pi, floor), log_pip(pj, floor))))
+                                      r_pip=pearson(pi, pj)))
                 xs.append(pi)
                 ys.append(pj)
             x, y = np.concatenate(xs), np.concatenate(ys)
@@ -180,7 +178,7 @@ def main():
             summary_rows.append(dict(
                 comparison="fold pairs", screen=screen, prior=prior, n_pairs=len(pairs),
                 F1_mean=pairs.F1.mean(), F1_sd=pairs.F1.std(), SHD_mean=pairs.SHD.mean(), SHD_sd=pairs.SHD.std(),
-                r_pip_pooled=pearson(x, y), r_log_pip_pooled=pearson(log_pip(x, floor), log_pip(y, floor))))
+                r_pip_pooled=pearson(x, y)))
             panels.append((prior, x, y))
         if not panels:
             continue
@@ -201,8 +199,7 @@ def main():
             x = runs["gwps", prior, "train"][0]
             y = runs["essential", prior, "train"][0]
             summary_rows.append(dict(comparison="essential vs gwps", screen="both", prior=prior,
-                                     r_pip_pooled=pearson(x, y),
-                                     r_log_pip_pooled=pearson(log_pip(x, floor), log_pip(y, floor))))
+                                     r_pip_pooled=pearson(x, y)))
             panels.append((prior, x, y))
     if panels:
         fig = plt.figure(figsize=(4.6 * len(panels), 4.6))
@@ -219,7 +216,7 @@ def main():
     summary.to_csv(os.path.join(args.out_dir, "pip_agreement_summary.csv"), index=False)
     with pd.option_context("display.width", 200, "display.max_columns", None, "display.precision", 3):
         print(summary.to_string(index=False))
-    print(f"zeros floored at {floor:.2e} for log PIP; figures and tables in {args.out_dir}")
+    print(f"zeros drawn at {floor:.2e} on the log axes; figures and tables in {args.out_dir}")
 
 
 if __name__ == "__main__":

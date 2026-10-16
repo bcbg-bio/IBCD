@@ -15,19 +15,6 @@
 #
 # Disk: each G_draws.npy is about 3.3 GB, so about 80 GB in all.
 #
-# SF_ANCHOR selects the SF prior's sparsity level (ibcd.py --sf_anchor): em,
-# the default, or none, the published max-normalisation. none writes to a
-# separate directory (ibcd_sfnone/). It has no effect on ER tasks, so
-# submit only the SF ones, e.g.
-#
-#   SF_ANCHOR=none bsub -J "IBCDreal[1-6,13-18]" < run_ibcd_real.sh
-#
-# INIT_STRATEGY sets where NUTS starts (ibcd.py --init_strategy): rhat, the
-# default, or optimized, the empty graph plus the same Adam descent. Anything
-# but rhat appends _init<strategy> to the output directory, e.g.
-#
-#   INIT_STRATEGY=optimized bsub -J "IBCDreal[1-24]" < run_ibcd_real.sh
-#
 #   mkdir -p logs && bsub < run_ibcd_real.sh
 
 #BSUB -J "IBCDreal[1-24]"
@@ -55,11 +42,7 @@ PRIOR=${PRIORS[$(( (i / 6) % 2 ))]}
 SCREEN=${SCREENS[$(( i / 12 ))]}
 
 DATA_FILE="$ROOT/$SCREEN/input/Y_matrix_${SCREEN}_${SPLIT}.csv"
-SF_ANCHOR="${SF_ANCHOR:-em}"
 RUN_DIR=ibcd
-[[ $SF_ANCHOR == none ]] && RUN_DIR=ibcd_sfnone
-INIT_STRATEGY="${INIT_STRATEGY:-rhat}"
-[[ $INIT_STRATEGY != rhat ]] && RUN_DIR=${RUN_DIR}_init${INIT_STRATEGY}
 OUT_DIR="$ROOT/$RUN_DIR/$SCREEN/$PRIOR/$SPLIT"
 
 if [[ ! -f "$DATA_FILE" ]]; then
@@ -69,7 +52,7 @@ if [[ ! -f "$DATA_FILE" ]]; then
 fi
 mkdir -p "$OUT_DIR"
 
-echo "task ${LSB_JOBINDEX} (sf_anchor $SF_ANCHOR, init $INIT_STRATEGY): screen=$SCREEN prior=$PRIOR split=$SPLIT"
+echo "task ${LSB_JOBINDEX}: screen=$SCREEN prior=$PRIOR split=$SPLIT"
 echo "  in  $DATA_FILE"
 echo "  out $OUT_DIR"
 echo "CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES:-unset}"
@@ -79,8 +62,6 @@ python "$IBCD" \
     --data "$DATA_FILE" \
     --prior "$PRIOR" \
     --output_dir "$OUT_DIR" \
-    --sf_anchor "$SF_ANCHOR" \
-    --init_strategy "$INIT_STRATEGY" \
     --save_diagnostics
 
 echo "task ${LSB_JOBINDEX} finished with status $?"

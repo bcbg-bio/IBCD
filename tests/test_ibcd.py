@@ -29,16 +29,12 @@ SRC = REPO / "src"
 sys.path.insert(0, str(SRC))
 
 from model import (  # noqa: E402
-    convergent_draws,
-    gelfand_radius,
-    latents_from_G,
+    draw_spectral_radius,
     matrix_model_spike_horseshoe,
     optimized_init,
     posterior_diagnostics,
     power_iteration_radius,
-    screen_draws,
-    rhat_start,
-    rho_log_penalty,
+    report_spectral_radius,
 )
 from empirical_prior import (  # noqa: E402
     _cap_and_redistribute,
@@ -173,7 +169,7 @@ def test_solve_spike_slab_diagonal_spike_satisfies_its_constraints():
     D = 10
     xi, _ = _fixture(D)
     pi0 = 0.8
-    pi0_ij, pi_k_ij, _ = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
+    pi0_ij, pi_k_ij = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
 
     offdiag = ~np.eye(D, dtype=bool)
     assert np.allclose(pi0_ij[offdiag] + pi_k_ij[offdiag], 1.0, atol=1e-6)
@@ -186,7 +182,7 @@ def test_solve_spike_slab_diagonal_spike_satisfies_its_constraints():
 def test_solve_spike_slab_diagonal_spike_leaves_no_hard_spike():
     D = 12
     xi, _ = _fixture(D, seed=5)
-    pi0_ij, _, _ = solve_spike_slab_diagonal_spike(xi, pi0=0.8)
+    pi0_ij, _ = solve_spike_slab_diagonal_spike(xi, pi0=0.8)
 
     offdiag = ~np.eye(D, dtype=bool)
     assert pi0_ij[offdiag].max() < 1.0 - 1e-6
@@ -196,7 +192,7 @@ def test_solve_spike_slab_diagonal_spike_matches_budget_scaled_xi():
     D = 12
     xi, _ = _fixture(D, seed=5)
     pi0 = 0.8
-    _, pi_k_ij, _ = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
+    _, pi_k_ij = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
 
     offdiag = ~np.eye(D, dtype=bool)
     target = xi * ((1.0 - pi0) * (D ** 2 - D) / xi[offdiag].sum())
@@ -212,7 +208,7 @@ def test_er_prior_is_symmetric():
     """
     D = 10
     xi, _ = _fixture(D)
-    pi0_ij, _, _ = solve_spike_slab_diagonal_spike(xi, pi0=0.8)
+    pi0_ij, _ = solve_spike_slab_diagonal_spike(xi, pi0=0.8)
     assert np.allclose(pi0_ij, pi0_ij.T, atol=1e-5)
 
 
@@ -263,7 +259,7 @@ def test_global_solver_matches_the_cvxpy_program():
     D = 12
     xi, _ = _fixture(D, seed=5)
     pi0 = 0.8
-    pi0_ij, pi_k_ij, _ = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
+    pi0_ij, pi_k_ij = solve_spike_slab_diagonal_spike(xi, pi0=pi0)
 
     offdiag = np.ones((D, D), dtype=bool)
     np.fill_diagonal(offdiag, False)
@@ -343,33 +339,6 @@ def _exact_rho(G):
     return float(np.abs(np.linalg.eigvals(np.asarray(G, dtype=np.float64))).max())
 
 
-def test_gelfand_radius_bounds_and_tracks_the_spectral_radius():
-    rng = np.random.default_rng(0)
-    for scale in (0.02, 0.1, 1.0, 50.0):                  # healthy through runaway
-        G = rng.normal(0, scale, (30, 30))
-        exact = _exact_rho(G)
-        est = float(gelfand_radius(G))
-        assert est >= exact * (1 - 1e-4), (scale, est, exact)
-        assert est <= exact * 1.15, (scale, est, exact)
-
-
-def test_gelfand_radius_vanishes_on_a_dag_with_a_finite_gradient():
-    import jax
-    rng = np.random.default_rng(1)
-    G = np.triu(rng.normal(0, 0.3, (20, 20)), 1)          # nilpotent: rho = 0
-    # the log-space floor leaves a small residue instead of exactly zero, but
-    # the gradient must stay finite there
-    assert float(gelfand_radius(G)) < 0.1
-    g = np.asarray(jax.grad(lambda x: gelfand_radius(x))(G))
-    assert np.isfinite(g).all()
-    # sampled G are never exactly nilpotent: the spike noise alone lifts rho
-    # well above zero through non-normal amplification, and the bound follows
-    Gn = G + rng.normal(0, 1e-3, G.shape); np.fill_diagonal(Gn, 0.0)
-    exact = _exact_rho(Gn)
-    assert exact > 0.1
-    assert exact * (1 - 1e-4) <= float(gelfand_radius(Gn)) <= exact * 1.15
-
-
 def test_power_iteration_radius_matches_main():
     """Port of spectral_radius from 42660bd: right when the dominant
     eigenvalue is real and well separated."""
@@ -380,9 +349,8 @@ def test_power_iteration_radius_matches_main():
 
 
 def test_power_iteration_radius_is_unreliable_on_a_complex_pair():
-    """Why it is tested against the Gelfand bound: when the leading
-    eigenvalues are a complex-conjugate pair the iterate rotates, so the
-    estimate need not approach rho."""
+    """When the leading eigenvalues are a complex-conjugate pair the iterate
+    rotates, so the estimate need not approach rho."""
     th = 2.0
     blk = 5.0 * np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
     G = np.zeros((6, 6)); G[:2, :2] = blk; G[:2, :2] += np.array([[0.0, -20.0], [0.0, 0.0]])   # non-normal, still complex
@@ -392,29 +360,38 @@ def test_power_iteration_radius_is_unreliable_on_a_complex_pair():
     exact = _exact_rho(G)
     est = float(power_iteration_radius(G))
     assert abs(est / exact - 1.0) > 0.1, (est, exact)
-    assert float(gelfand_radius(G)) >= exact * (1 - 1e-4)
-
-
-def test_rho_barrier_is_zero_inside_and_grows_outside():
-    kw = dict(start=0.9, width=0.05)
-    assert float(rho_log_penalty(0.5, "barrier", **kw)) == 0.0
-    assert float(rho_log_penalty(0.9, "barrier", **kw)) == 0.0
-    a = float(rho_log_penalty(1.0, "barrier", **kw)); b = float(rho_log_penalty(1.5, "barrier", **kw))
-    assert a < 0.0 and b < a
-    assert np.isclose(a, -((1.0 - 0.9) / 0.05) ** 2)
-
-
-def test_rho_barrier_defaults_are_the_soft_barrier():
-    """start 1.0, width 0.2: free up to rho = 1, one nat at rho = 1.2."""
-    assert float(rho_log_penalty(1.0, "barrier")) == 0.0
-    assert np.isclose(float(rho_log_penalty(1.2, "barrier")), -1.0)
 
 
 def test_rho_gaussian_is_the_appendix_h_prior():
+    """The penalty adds log N(rho; 0, sigma^2) for rho from power iteration."""
+    import jax.numpy as jnp
+    from numpyro import handlers
     from scipy import stats
-    for r in (0.0, 0.5, 2.0):
-        assert np.isclose(float(rho_log_penalty(r, "gaussian", sigma=0.5)),
-                          stats.norm(0, 0.5).logpdf(r))
+    D = 6
+    rng = np.random.default_rng(3)
+    kw = dict(obs_data=np.eye(D) + rng.normal(0, 0.05, (D, D)),
+              pi0_ij=np.full((D, D), 0.5), U_lower=jnp.eye(D) * 0.1,
+              V_lower=jnp.eye(D), D=D, rho_penalty="gaussian", rho_sigma=0.5)
+    tr = handlers.trace(handlers.seed(matrix_model_spike_horseshoe, 0)).get_trace(**kw)
+    rho = float(power_iteration_radius(jnp.asarray(tr["G"]["value"])))
+    assert np.isclose(float(tr["rho_estimate"]["value"]), rho)
+    log_factor = float(tr["spectral_radius_penalty"]["fn"].log_factor)
+    assert np.isclose(log_factor, stats.norm(0, 0.5).logpdf(rho), rtol=1e-5)
+
+
+def test_unknown_rho_penalty_is_rejected():
+    import jax
+    import jax.numpy as jnp
+    from numpyro.infer.util import initialize_model
+    D = 4
+    kw = dict(obs_data=np.eye(D), pi0_ij=np.full((D, D), 0.5), U_lower=jnp.eye(D) * 0.1,
+              V_lower=jnp.eye(D), D=D, rho_penalty="barrier")
+    try:
+        initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=kw)
+    except Exception as exc:          # noqa: BLE001
+        assert "unknown rho penalty" in str(exc)
+    else:
+        raise AssertionError("an unknown rho penalty was accepted")
 
 
 def test_model_log_density_is_finite_under_each_rho_penalty():
@@ -426,15 +403,14 @@ def test_model_log_density_is_finite_under_each_rho_penalty():
     kw = dict(obs_data=np.eye(D) + rng.normal(0, 0.05, (D, D)),
               pi0_ij=np.full((D, D), 0.8), U_lower=jnp.eye(D) * 0.1,
               V_lower=jnp.eye(D), D=D)
-    for pen, est in [(None, "power"), ("gaussian", "power"),
-                     ("gaussian", "gelfand"), ("barrier", "gelfand")]:
+    for pen in (None, "gaussian"):
         info = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe,
-                                model_kwargs=dict(kw, rho_penalty=pen, rho_estimator=est))
+                                model_kwargs=dict(kw, rho_penalty=pen))
         z = info.param_info.z
         pe = float(info.potential_fn(z))
         grads = jax.grad(info.potential_fn)(z)
-        assert np.isfinite(pe), (pen, est)
-        assert all(np.isfinite(np.asarray(v)).all() for v in grads.values()), (pen, est)
+        assert np.isfinite(pe), pen
+        assert all(np.isfinite(np.asarray(v)).all() for v in grads.values()), pen
 
 
 def _iv_data(D=6, n_int=400, seed=5):
@@ -543,45 +519,6 @@ def test_optimized_init_starts_are_accepted_by_nuts():
     assert np.isfinite(np.asarray(m.get_samples()["G"])).all()
 
 
-def test_rhat_start_soft_thresholds_at_k_standard_errors():
-    R = np.array([[1.0, 0.5, -0.05], [0.02, 1.0, -0.4], [0.0, 0.1, 1.0]])
-    S = np.array([[0.0, 0.1, 0.1], [0.1, 0.0, 0.1], [0.1, 0.1, 0.0]])
-    G0 = rhat_start(R, S, k=3)
-    assert np.allclose(np.diag(G0), 0.0)
-    assert np.isclose(G0[0, 1], 0.2) and np.isclose(G0[1, 2], -0.1)     # shrunk, sign kept
-    assert G0[0, 2] == 0.0 and G0[1, 0] == 0.0 and G0[2, 1] == 0.0      # below 3 SE
-
-
-def test_latents_from_G_reproduces_G_through_the_model():
-    import jax
-    from numpyro.infer.util import initialize_model
-    kw = _small_model_kwargs()
-    rng = np.random.default_rng(4)
-    G = rng.normal(0, 0.3, (6, 6)) * (rng.random((6, 6)) < 0.5); np.fill_diagonal(G, 0.0)
-    mi = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=kw)
-    z = latents_from_G(G, kw["pi0_ij"], tau=0.1)
-    assert np.abs(np.asarray(z["eps"])).max() <= 1.0 + 1e-9
-    assert np.allclose(np.asarray(mi.postprocess_fn(z)["G"]), G, atol=1e-6)
-
-
-def test_latents_from_G_takes_the_most_probable_split():
-    """For each entry the split of lam * eps maximises the prior density in
-    the sampler's coordinates (log lam), and a zero entry gets the values
-    init_to_median gives."""
-    pi0 = np.full((3, 3), 0.5); tau = 0.1; m = 0.5 * tau
-    G = np.array([[0.0, 0.03, -0.2], [1.5, 0.0, 0.0], [0.0, -0.001, 0.0]])
-    z = latents_from_G(G, pi0, tau)
-    lam = np.exp(np.asarray(z["lam"])); eps = np.asarray(z["eps"])
-    assert np.allclose(lam[G == 0], 1.0) and np.allclose(eps[G == 0], 0.0)
-    f = lambda l, e: -np.log1p(l * l) + np.log(l) - 0.5 * e * e
-    for i, j in zip(*np.nonzero(G)):
-        a = abs(G[i, j]) / m
-        best = f(lam[i, j], eps[i, j])
-        for scale in (0.9, 0.99, 1.01, 1.1):          # other splits with the same product
-            l = lam[i, j] * scale
-            assert f(l, np.sign(G[i, j]) * a / l) < best
-
-
 def test_em_slab_scale_is_the_rms_of_the_slab():
     pi_k = np.array([0.3, 0.1, 0.0]); sigma_k = np.array([0.1, 0.5, 1.0])
     assert np.isclose(em_slab_scale(pi_k, sigma_k), np.sqrt((0.3 * 0.01 + 0.1 * 0.25) / 0.4))
@@ -605,40 +542,20 @@ def test_regularised_slab_saturates_at_its_width():
     assert np.asarray(mi0.postprocess_fn(z)["G"])[off].min() > 1e3
 
 
-def test_latents_from_G_reproduces_G_with_a_slab_width():
+def test_optimized_init_with_no_steps_starts_at_the_median_draws():
+    """steps = 0 and no jitter return each chain's init_to_median draw unchanged."""
     import jax
-    from numpyro.infer.util import initialize_model
-    kw = dict(_small_model_kwargs(), slab_width=0.2)
-    rng = np.random.default_rng(6)
-    G = rng.normal(0, 0.3, (6, 6)) * (rng.random((6, 6)) < 0.5); np.fill_diagonal(G, 0.0)
-    mi = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=kw)
-    z = latents_from_G(G, kw["pi0_ij"], tau=0.1, slab_width=0.2)
-    assert np.allclose(np.asarray(mi.postprocess_fn(z)["G"]), G, atol=1e-6)
-
-
-def test_optimized_init_from_a_start_G():
-    import jax
-    kw = _small_model_kwargs()
-    G0 = rhat_start(kw["obs_data"], np.full((6, 6), 0.01), k=3)
-    z, info = optimized_init(matrix_model_spike_horseshoe, kw, jax.random.PRNGKey(0),
-                             num_chains=3, steps=200, start_G=G0)
-    assert z["eps"].shape == (3, 6, 6)
-    assert all(a <= b for a, b in zip(info["potential_after"], info["potential_before"]))
-
-
-def test_optimized_init_with_no_steps_starts_at_start_G():
-    import jax
+    from numpyro import infer
     from numpyro.infer.util import initialize_model
     kw = _small_model_kwargs()
-    G0 = rhat_start(kw["obs_data"], np.full((6, 6), 0.01), k=3)
-    z, info = optimized_init(matrix_model_spike_horseshoe, kw, jax.random.PRNGKey(0),
-                             num_chains=2, steps=0, jitter=0.0, start_G=G0)
-    mi = initialize_model(jax.random.PRNGKey(0), matrix_model_spike_horseshoe, model_kwargs=kw)
-    for c in range(2):
-        Gc = np.asarray(mi.postprocess_fn(jax.tree_util.tree_map(lambda x: x[c], z))["G"])
-        assert np.allclose(Gc, G0, atol=1e-6)
+    key = jax.random.PRNGKey(0)
+    z, info = optimized_init(matrix_model_spike_horseshoe, kw, key, num_chains=2, steps=0, jitter=0.0)
+    k_init, _ = jax.random.split(key)
+    mi = initialize_model(jax.random.split(k_init, 2), matrix_model_spike_horseshoe, model_kwargs=kw,
+                          init_strategy=infer.init_to_median(num_samples=50))
+    for name in ("lam", "eps", "spike"):
+        assert np.allclose(np.asarray(z[name]), np.asarray(mi.param_info.z[name])), name
     assert np.allclose(info["potential_after"], info["potential_before"])
-
 
 def test_cap_and_redistribute_preserves_the_total():
     b = np.array([10.0, 1.0, 1.0, 1.0])
@@ -719,8 +636,8 @@ def test_posterior_diagnostics_bounds_the_rhat_subsample():
     rng = np.random.default_rng(0)
     D, n_chains, n_draws = 8, 3, 40
     g = rng.normal(0, 0.01, (n_chains, n_draws, D, D))
-    keep, rho = convergent_draws(g.reshape(-1, D, D))
-    out = posterior_diagnostics(g, rho, keep, seed=0, max_rhat_entries=17)
+    rho = draw_spectral_radius(g.reshape(-1, D, D))
+    out = posterior_diagnostics(g, rho, seed=0, max_rhat_entries=17)
     assert out["r_hat"]["n_entries_used"] == 17
     assert out["r_hat"]["n_entries_total"] == D * D - D
 
@@ -751,18 +668,12 @@ def test_scale_free_degree_matches_the_cvxpy_program():
 # Truncated path sum and draw convergence
 # --------------------------------------------------------------------------
 
-def keep_mask_count(diag):
-    return diag["n_draws_total"] - diag["excluded"]["n"]
-
-
 def test_posterior_diagnostics_reports_what_the_run_did():
     rng = np.random.default_rng(0)
     C, N, D = 2, 30, 6
     draws = np.stack([np.stack([_dag(D, seed=c * N + n) for n in range(N)])
                       for c in range(C)])
     draws[1, :5] *= 0.0                      # make a few draws trivially distinct
-    keep = np.ones(C * N, dtype=bool)
-    keep[[3, 7]] = False                     # pretend two draws were rejected
     rho = rng.random(C * N)
     extra = {"diverging": np.zeros((C, N), dtype=bool),
              "num_steps": np.full((C, N), 7),
@@ -770,10 +681,10 @@ def test_posterior_diagnostics_reports_what_the_run_did():
              "adapt_state.step_size": np.full((C, N), 3e-3)}
     extra["diverging"][0, :4] = True
 
-    d = posterior_diagnostics(draws, rho, keep, extra_fields=extra)
+    d = posterior_diagnostics(draws, rho, extra_fields=extra)
     assert d["n_chains"] == C and d["n_draws_total"] == C * N and d["D"] == D
-    assert d["excluded"]["n"] == 2                       # what the filter removed
-    assert d["nonconvergent"]["n"] == int((np.asarray(rho) >= 1).sum())   # rho >= 1, kept or not
+    assert "excluded" not in d                           # every draw is kept
+    assert d["nonconvergent"]["n"] == int((np.asarray(rho) >= 1).sum())
     assert d["divergences"]["n"] == 4 and d["divergences"]["per_chain"] == [4, 0]
     assert d["leapfrog"]["total"] == C * N * 7
     assert np.isclose(d["step_size"]["median"], 3e-3)
@@ -783,9 +694,9 @@ def test_posterior_diagnostics_reports_what_the_run_did():
     # the saturation cap follows max_tree_depth rather than being hardcoded
     assert d["leapfrog"]["max_leapfrog_steps"] == 2 ** 12 - 1   # the default
     extra_sat = dict(extra, num_steps=np.full((C, N), 2 ** 12 - 1))
-    d10 = posterior_diagnostics(draws, rho, keep, extra_fields=extra_sat,
+    d10 = posterior_diagnostics(draws, rho, extra_fields=extra_sat,
                                 max_tree_depth=10)
-    d12 = posterior_diagnostics(draws, rho, keep, extra_fields=extra_sat,
+    d12 = posterior_diagnostics(draws, rho, extra_fields=extra_sat,
                                 max_tree_depth=12)
     assert d10["leapfrog"]["max_leapfrog_steps"] == 1023
     assert d12["leapfrog"]["max_leapfrog_steps"] == 4095
@@ -794,7 +705,7 @@ def test_posterior_diagnostics_reports_what_the_run_did():
     assert d12["leapfrog"]["pct_at_max_tree_depth"] == 100.0
     # ... but 1023 steps only saturates at depth 10
     extra_mid = dict(extra, num_steps=np.full((C, N), 1023))
-    assert posterior_diagnostics(draws, rho, keep, extra_fields=extra_mid,
+    assert posterior_diagnostics(draws, rho, extra_fields=extra_mid,
                                  max_tree_depth=12)["leapfrog"]["pct_at_max_tree_depth"] == 0.0
     assert d["spectral_radius"]["max"] <= 1.0
     import json as _json
@@ -809,70 +720,39 @@ def _dag(D, seed=0, density=0.15, scale=0.25):
     return G
 
 
-def _series(G, order):
-    D = G.shape[0]
-    R = np.eye(D)
-    for _ in range(order):
-        R = np.eye(D) + G @ R
-    return R
-
-
-def test_series_equals_inverse_at_sufficient_order():
-    """For a DAG the two agree exactly once the order reaches the longest path."""
-    D = 20
-    G = _dag(D, seed=2)
-    exact = np.linalg.inv(np.eye(D) - G)
-    # G is nilpotent: G^D is identically zero, so order D-1 suffices
-    assert np.allclose(_series(G, D - 1), exact, atol=1e-12)
-    assert np.allclose(np.linalg.matrix_power(G, D), 0.0)
-
-
-def test_series_stays_bounded_where_the_inverse_blows_up():
-    """Near the singularity of (I - G) the inverse explodes; the sum does not.
-
-    This is the numerical reason to prefer the series: the inverse has a pole
-    the sampler can approach, and its gradients scale as ||(I - G)^-1||^2.
-    """
-    D = 20
-    G = _dag(D, seed=2)
-    G = G + 3.0 * G.T                                     # make it cyclic
-    G = G / (np.abs(np.linalg.eigvals(G)).max() * 1.001)  # push rho just under 1
-
-    inv_norm = np.linalg.norm(np.linalg.inv(np.eye(D) - G), 2)
-    series_norm = np.linalg.norm(_series(G, 24), 2)
-    assert np.isfinite(series_norm)
-    assert inv_norm > 20 * series_norm, (
-        f"inverse {inv_norm:.1f} vs series {series_norm:.1f}"
-    )
-
-
-def test_convergent_draws_separates_runaway_draws():
+def test_draw_spectral_radius_is_zero_on_dags_and_large_on_cycles():
     D = 8
     good = np.stack([_dag(D, seed=s) for s in range(5)])
-    bad = good * 500.0  # far outside the region where sum_d G^d converges
-    draws = np.concatenate([good, bad])
-
-    keep, rho = convergent_draws(draws)
-    assert keep.shape == (10,) and rho.shape == (10,)
     # a nilpotent G stays nilpotent under scaling, so rho is 0 for all of these
-    assert keep.all() and np.allclose(rho, 0.0)
-
-    # a genuinely cyclic draw with rho >= 1 must be dropped
+    rho = draw_spectral_radius(np.concatenate([good, good * 500.0]))
+    assert rho.shape == (10,) and np.allclose(rho, 0.0)
     cyc = np.stack([g + 3.0 * g.T for g in good]) * 5.0
-    keep2, rho2 = convergent_draws(np.concatenate([good, cyc]))
-    assert keep2[:5].all()
-    assert not keep2[5:].any(), f"cyclic draws must be dropped, rho={rho2[5:]}"
+    assert (draw_spectral_radius(cyc) >= 1.0).all()
 
 
-def test_convergent_draws_threshold_is_the_spectral_radius():
+def test_draw_spectral_radius_flattens_leading_axes():
     D = 6
     G = np.zeros((D, D))
     G[0, 1] = G[1, 0] = 0.4          # 2-cycle, rho = 0.4
-    keep, rho = convergent_draws(G[None])
-    assert np.isclose(rho[0], 0.4) and keep[0]
-    G[0, 1] = G[1, 0] = 1.2          # rho = 1.2
-    keep, rho = convergent_draws(G[None])
-    assert np.isclose(rho[0], 1.2) and not keep[0]
+    H = G * 3.0                      # rho = 1.2
+    rho = draw_spectral_radius(np.stack([np.stack([G, H])] * 2))     # (chains, draws, D, D)
+    assert np.allclose(rho, [0.4, 1.2, 0.4, 1.2])
+
+
+def test_report_spectral_radius_notes_and_warns():
+    import contextlib
+    import io
+    import warnings
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        report_spectral_radius(np.array([0.5, 0.8, 0.2, 0.9]), 2)
+        assert buf.getvalue() == "" and not w                 # nothing to report
+        report_spectral_radius(np.array([0.5, 1.5, 3.0, 0.2]), 2)
+        assert "2 of 4 draws" in buf.getvalue() and "chain 0: 1/2, chain 1: 1/2" in buf.getvalue()
+        assert not w
+        report_spectral_radius(np.array([0.5, 12.0]), 1)
+        assert any("exceeds 10" in str(x.message) for x in w)
 
 
 # --------------------------------------------------------------------------
@@ -893,12 +773,12 @@ def _chain_of_dags(n_draws, D, seed):
     return np.stack([_dag(D, seed=seed * 1000 + n) for n in range(n_draws)])[None]
 
 
-def _combine(chain_dirs, out, epsilon=0.05, max_spectral_radius=None):
+def _combine(chain_dirs, out, epsilon=0.05):
     import argparse
     import combine_chains
     combine_chains.main(argparse.Namespace(
         chain_dirs=[str(c) for c in chain_dirs], output_dir=str(out),
-        epsilon=epsilon, seed=42, max_spectral_radius=max_spectral_radius,
+        epsilon=epsilon, seed=42,
     ))
     return {n: pd.read_csv(out / f"{n}.csv", index_col=0)
             for n in ("G", "pip", "lfsr")}, json.load((out / "diagnostics.json").open())
@@ -964,58 +844,25 @@ def _runaway_chains(tmp, D, N):
     return good, bad, dirs
 
 
-def test_combine_chains_keeps_every_draw_by_default():
-    """Without --max_spectral_radius nothing is excluded; rho >= 1 is reported."""
+def test_combine_chains_keeps_every_draw():
+    """Nothing is excluded; draws with rho >= 1 are reported."""
     D, N = 6, 5
     with tempfile.TemporaryDirectory() as tmp:
         good, bad, dirs = _runaway_chains(tmp, D, N)
         out, diag = _combine(dirs, Path(tmp) / "combined")
-        assert diag["excluded"]["n"] == 0
+        assert "excluded" not in diag
         assert diag["nonconvergent"]["per_chain"] == [0, 0, N]
         allv = np.concatenate(good + [bad], axis=0).reshape(-1, D, D).astype(np.float32)
         assert np.allclose(out["G"].values, allv.mean(axis=0), atol=1e-6)
 
 
-def test_screen_draws_keeps_everything_by_default_and_cuts_when_asked():
-    import warnings
-    rho = np.array([0.5, 0.8, 1.5, 3.0, 0.2, 0.9])
-    assert screen_draws(rho, 2).all()
-    assert (screen_draws(rho, 2, max_spectral_radius=1.0) == (rho < 1.0)).all()
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        screen_draws(np.array([0.5, 12.0]), 1)
-        assert any("exceeds 10" in str(x.message) for x in w)
+def _run_pipeline(prior="sf", save_diagnostics=True, oracle=False, **overrides):
+    """Run the real pipeline on a small subset of the shipped example data.
 
-
-def test_combine_chains_excludes_nonconvergent_draws():
-    """With --max_spectral_radius 1, a runaway chain is dropped from the summaries."""
-    D, N = 6, 5
-    with tempfile.TemporaryDirectory() as tmp:
-        good = [_chain_of_dags(N, D, c) for c in range(2)]
-        bad = _chain_of_dags(N, D, 2).copy()
-        bad[:, :, 0, 1] = 2.0          # a 2-cycle of weight 2 gives rho = 2
-        bad[:, :, 1, 0] = 2.0
-        assert (np.abs(np.linalg.eigvals(bad[0])).max(axis=1) >= 1).all()
-        dirs = [_write_chain(Path(tmp) / f"chain{c}", ch)
-                for c, ch in enumerate(good + [bad])]
-        out, diag = _combine(dirs, Path(tmp) / "combined", max_spectral_radius=1.0)
-
-        assert diag["excluded"]["n"] == N
-        assert diag["excluded"]["per_chain"] == [0, 0, N]
-        assert diag["nonconvergent"]["per_chain"] == [0, 0, N]
-        # the combined mean must use only the two healthy chains
-        kept = np.concatenate(good, axis=0).reshape(-1, D, D).astype(np.float32)
-        assert np.allclose(out["G"].values, kept.mean(axis=0), atol=1e-6)
-
-
-# --------------------------------------------------------------------------
-# End to end (slow)
-# --------------------------------------------------------------------------
-
-def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
-                  rho_estimator="power", init_strategy="median", sf_anchor="em",
-                  slab_width="none", init_G_matrix=None):
-    """Run the real pipeline on a small subset of the shipped example data."""
+    `overrides` replace the defaults below, which are the command-line
+    defaults apart from a short sampler (20 warmup, 40 samples, one chain,
+    acceptance 0.7, depth 10, 200 Adam steps) to keep the tests quick.
+    """
     import argparse
     import ibcd
 
@@ -1027,37 +874,43 @@ def _run_pipeline(truncated_series, save_diagnostics=True, rho_penalty="none",
         path = Path(tmp) / "data.csv"
         sub.to_csv(path, index=False)
         out = Path(tmp) / "out"
-        init_G = None
-        if init_G_matrix is not None:
-            init_G = str(Path(tmp) / "G_start.csv")
-            pd.DataFrame(init_G_matrix, columns=keep).to_csv(init_G, index=False)
-        ibcd.main(argparse.Namespace(
-            data=str(path), prior="sf", output_dir=str(out),
-            alpha_er=2.0, pi0_floor=0.05, sf_anchor=sf_anchor,
+        oracle_G = None
+        if oracle:
+            oracle_G = str(Path(tmp) / "G_true.csv")
+            rng = np.random.default_rng(7)
+            G0 = np.triu(rng.normal(0, 0.2, (10, 10)) * (rng.random((10, 10)) < 0.3), 1)
+            pd.DataFrame(G0, columns=keep).to_csv(oracle_G, index=False)
+        args = dict(
+            data=str(path), prior=prior, output_dir=str(out),
+            alpha_er=2.0, pi0_floor=0.05, sf_anchor="em",
             num_warmup=20, num_samples=40, num_chains=1, epsilon=0.05,
             chain_method="vectorized",
-            target_accept_prob=0.7, max_tree_depth=10,
-            truncated_series=truncated_series, series_order=24, seed=42,
+            target_accept_prob=0.7, max_tree_depth=10, seed=42,
             save_diagnostics=save_diagnostics,
-            rho_penalty=rho_penalty, rho_estimator=rho_estimator, rho_sigma=0.5,
-            rho_barrier_start=1.0, rho_barrier_width=0.2,
-            init_strategy=init_strategy, init_opt_steps=200, init_opt_lr=0.01,
-            init_jitter=0.1, init_rhat_k=3.0, init_G=init_G, slab_width=slab_width,
-            max_spectral_radius=None,
-        ))
+            rho_penalty="none", rho_sigma=0.5,
+            init_opt_steps=200, init_opt_lr=0.01, init_jitter=0.1,
+            slab_width="em", oracle_G=oracle_G, global_prior=False,
+            likelihood="mn", mvn_rank=10, mvn_jitter=1e-5,
+        )
+        unknown = set(overrides) - set(args)
+        assert not unknown, f"unknown options {unknown}"
+        args.update(overrides)
+        ibcd.main(argparse.Namespace(**args))
 
         pip = pd.read_csv(out / "pip.csv", index_col=0)
         G = pd.read_csv(out / "G.csv", index_col=0)
         lfsr = pd.read_csv(out / "lfsr.csv", index_col=0)
+        draws = np.load(out / "G_draws.npy")
         diag_path = out / "diagnostics.json"
         assert diag_path.exists() == save_diagnostics, (
             "diagnostics.json presence must follow --save_diagnostics"
         )
         diag = json.load(diag_path.open()) if save_diagnostics else None
+    assert draws.shape == (args["num_chains"], args["num_samples"], len(keep), len(keep))
     return keep, pip, G, lfsr, diag
 
 
-def _check_outputs(keep, pip, G, lfsr, diag):
+def _check_outputs(keep, pip, G, lfsr, diag, min_max_pip=0.5):
     D = len(keep)
     for name, df in [("pip", pip), ("G", G), ("lfsr", lfsr)]:
         assert df.shape == (D, D), f"{name}.csv has shape {df.shape}"
@@ -1071,91 +924,104 @@ def _check_outputs(keep, pip, G, lfsr, diag):
     assert np.allclose(np.diag(G.values), 0.0)
     assert np.allclose(np.diag(pip.values), 0.0)
     # the posterior should not be degenerate: some edges get real support
-    assert pip.values.max() > 0.5, "no edge reached PIP > 0.5"
+    assert pip.values.max() > min_max_pip, f"no edge reached PIP > {min_max_pip}"
 
     if diag is None:
         return
     # when requested, the run must leave a usable diagnostics record
     for key in ("n_chains", "n_draws_total", "nonconvergent", "spectral_radius",
                 "divergences", "leapfrog", "step_size", "accept_prob",
-                "runtime_seconds", "config"):
+                "runtime_seconds", "config", "init"):
         assert key in diag, f"diagnostics.json missing {key}"
-    assert diag["config"]["seed"] == 42
-    assert diag["config"]["target_accept_prob"] == 0.7
-    assert diag["config"]["max_tree_depth"] == 10
-    assert diag["excluded"]["n"] + int(keep_mask_count(diag)) == diag["n_draws_total"]
-    if diag["config"]["max_spectral_radius"] is None:      # the default keeps every draw
-        assert diag["excluded"]["n"] == 0
-
-
-def test_end_to_end_outputs_are_well_formed():
-    _check_outputs(*_run_pipeline(truncated_series=False, save_diagnostics=True))
-
-
-def test_end_to_end_outputs_are_well_formed_with_truncated_series():
-    # also covers the default, where no diagnostics file is written
-    _check_outputs(*_run_pipeline(truncated_series=True, save_diagnostics=False))
-
-
-def test_end_to_end_outputs_are_well_formed_with_a_rho_penalty():
-    keep, pip, G, lfsr, diag = _run_pipeline(
-        truncated_series=False, save_diagnostics=True,
-        rho_penalty="barrier", rho_estimator="gelfand")
-    _check_outputs(keep, pip, G, lfsr, diag)
-    assert diag["config"]["rho_penalty"] == "barrier"
-    assert diag["config"]["rho_estimator"] == "gelfand"
-    assert diag["rho_estimate"]["median"] >= 0.0
-    # gelfand is an upper bound, so it should not sit far below the exact rho
-    assert diag["rho_estimate"]["median_ratio_to_exact"] > 0.9
-
-
-def test_end_to_end_outputs_are_well_formed_with_an_optimized_start():
-    keep, pip, G, lfsr, diag = _run_pipeline(
-        truncated_series=False, save_diagnostics=True,
-        rho_penalty="barrier", rho_estimator="gelfand", init_strategy="optimized")
-    _check_outputs(keep, pip, G, lfsr, diag)
-    assert diag["config"]["init_strategy"] == "optimized"
-    assert diag["config"]["rho_barrier_start"] == 1.0
+    assert "excluded" not in diag
+    cfg = diag["config"]
+    assert cfg["seed"] == 42
+    assert cfg["target_accept_prob"] == 0.7 and cfg["max_tree_depth"] == 10
+    assert cfg["init_strategy"] == "optimized"
     assert len(diag["init"]["rho_start_per_chain"]) == diag["n_chains"]
-    assert all(a < b for a, b in zip(diag["init"]["potential_after"],
-                                     diag["init"]["potential_before"]))
+    if cfg["init_opt_steps"] > 0:
+        assert all(a < b for a, b in zip(diag["init"]["potential_after"],
+                                         diag["init"]["potential_before"]))
 
 
-def test_end_to_end_outputs_are_well_formed_without_the_sf_anchor():
-    keep, pip, G, lfsr, diag = _run_pipeline(
-        truncated_series=False, save_diagnostics=True, sf_anchor="none")
+def test_end_to_end_sf_with_the_defaults():
+    keep, pip, G, lfsr, diag = _run_pipeline(prior="sf")
+    _check_outputs(keep, pip, G, lfsr, diag)
+    cfg = diag["config"]
+    assert cfg["sf_anchor"] == "em" and cfg["slab_width"] == "em"
+    assert 0.1 <= cfg["slab_width_value"] <= 1.0      # within the EM's grid
+    assert cfg["rho_penalty"] == "none" and cfg["likelihood"] == "mn"
+
+
+def test_end_to_end_er_without_diagnostics():
+    _check_outputs(*_run_pipeline(prior="er", save_diagnostics=False))
+
+
+def test_end_to_end_sf_published_prior_and_horseshoe():
+    """--sf_anchor none with --slab_width none: the published SF prior and slab."""
+    keep, pip, G, lfsr, diag = _run_pipeline(prior="sf", sf_anchor="none", slab_width="none")
     _check_outputs(keep, pip, G, lfsr, diag)
     assert diag["config"]["sf_anchor"] == "none"
+    assert diag["config"]["slab_width"] == "none" and diag["config"]["slab_width_value"] is None
 
 
-def test_end_to_end_outputs_are_well_formed_with_the_rhat_start():
-    keep, pip, G, lfsr, diag = _run_pipeline(
-        truncated_series=False, save_diagnostics=True, init_strategy="rhat")
+def test_end_to_end_sf_without_the_anchor_keeps_the_em_slab_width():
+    """--sf_anchor none skips the EM for the prior but --slab_width em still runs it."""
+    keep, pip, G, lfsr, diag = _run_pipeline(prior="sf", sf_anchor="none")
     _check_outputs(keep, pip, G, lfsr, diag)
-    assert diag["config"]["init_strategy"] == "rhat"
-    assert diag["config"]["init_rhat_k"] == 3.0
-    assert len(diag["init"]["rho_start_per_chain"]) == diag["n_chains"]
+    assert 0.1 <= diag["config"]["slab_width_value"] <= 1.0
 
 
-def test_end_to_end_outputs_are_well_formed_with_a_slab_width_and_a_file_start():
-    rng = np.random.default_rng(7)
-    G0 = np.triu(rng.normal(0, 0.2, (10, 10)) * (rng.random((10, 10)) < 0.3), 1)
-    keep, pip, G, lfsr, diag = _run_pipeline(
-        truncated_series=False, save_diagnostics=True, init_strategy="file",
-        slab_width="em", init_G_matrix=G0)
+def test_end_to_end_with_the_appendix_h_penalty():
+    for prior, slab in (("sf", "em"), ("er", "none")):
+        keep, pip, G, lfsr, diag = _run_pipeline(prior=prior, rho_penalty="gaussian", slab_width=slab)
+        _check_outputs(keep, pip, G, lfsr, diag)
+        assert diag["config"]["rho_penalty"] == "gaussian" and diag["config"]["rho_sigma"] == 0.5
+        assert diag["rho_estimate"]["median"] >= 0.0
+        assert diag["rho_estimate"]["median_ratio_to_exact"] > 0.0
+
+
+def test_end_to_end_with_the_mvn_likelihood():
+    keep, pip, G, lfsr, diag = _run_pipeline(prior="er", likelihood="mvn")
+    _check_outputs(keep, pip, G, lfsr, diag, min_max_pip=0.0)
+    assert diag["config"]["likelihood"] == "mvn" and diag["config"]["mvn_rank"] == 10
+
+
+def test_end_to_end_with_the_oracle_and_global_priors():
+    for kw in (dict(oracle=True), dict(global_prior=True), dict(oracle=True, global_prior=True)):
+        keep, pip, G, lfsr, diag = _run_pipeline(prior="er", **kw)
+        _check_outputs(keep, pip, G, lfsr, diag, min_max_pip=0.0)
+        assert bool(diag["config"]["oracle_G"]) == kw.get("oracle", False)
+        assert diag["config"]["global_prior"] == kw.get("global_prior", False)
+
+
+def test_end_to_end_with_two_sequential_chains_and_no_adam_steps():
+    keep, pip, G, lfsr, diag = _run_pipeline(prior="sf", num_chains=2, chain_method="sequential",
+                                             init_opt_steps=0, epsilon=0.075)
     _check_outputs(keep, pip, G, lfsr, diag)
-    assert diag["config"]["init_strategy"] == "file"
-    assert diag["config"]["slab_width"] == "em"
-    assert 0.1 <= diag["config"]["slab_width_value"] <= 1.0      # within the EM's grid
+    assert diag["n_chains"] == 2 and "max" in diag["r_hat"]
+    assert diag["config"]["init_opt_steps"] == 0 and diag["config"]["epsilon"] == 0.075
+    assert np.allclose(diag["init"]["potential_after"], diag["init"]["potential_before"])
 
 
-SLOW = {"test_end_to_end_outputs_are_well_formed_with_a_slab_width_and_a_file_start",
-        "test_end_to_end_outputs_are_well_formed_with_the_rhat_start",
-        "test_end_to_end_outputs_are_well_formed_without_the_sf_anchor",
-        "test_end_to_end_outputs_are_well_formed_with_an_optimized_start",
-        "test_end_to_end_outputs_are_well_formed",
-        "test_end_to_end_outputs_are_well_formed_with_truncated_series",
-        "test_end_to_end_outputs_are_well_formed_with_a_rho_penalty"}
+def test_er_only_ablations_are_rejected_with_the_sf_prior():
+    for kw in (dict(oracle=True), dict(global_prior=True)):
+        try:
+            _run_pipeline(prior="sf", **kw)
+        except ValueError as exc:
+            assert "ablations of the ER prior" in str(exc)
+        else:
+            raise AssertionError(f"{kw} was accepted with --prior sf")
+
+
+SLOW = {"test_end_to_end_sf_with_the_defaults",
+        "test_end_to_end_er_without_diagnostics",
+        "test_end_to_end_sf_published_prior_and_horseshoe",
+        "test_end_to_end_sf_without_the_anchor_keeps_the_em_slab_width",
+        "test_end_to_end_with_the_appendix_h_penalty",
+        "test_end_to_end_with_the_mvn_likelihood",
+        "test_end_to_end_with_the_oracle_and_global_priors",
+        "test_end_to_end_with_two_sequential_chains_and_no_adam_steps"}
 
 
 def _main():

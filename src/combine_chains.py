@@ -11,9 +11,8 @@ Column names are taken from the first directory's `G.csv`.
     python combine_chains.py --chain_dirs out/chain1 out/chain2 out/chain3 \\
                              --output_dir out/combined
 
-Draws are kept or excluded exactly as in a single run (every draw by default;
-`--max_spectral_radius` excludes those at or above it), and R-hat and ESS are
-computed across the combined chains.
+Every draw is kept, as in a single run, and R-hat and ESS are computed across
+the combined chains.
 """
 
 import argparse
@@ -24,7 +23,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from model import compute_lfsr, convergent_draws, posterior_diagnostics, screen_draws
+from model import compute_lfsr, draw_spectral_radius, posterior_diagnostics, report_spectral_radius
 
 
 def load_chains(chain_dirs):
@@ -64,15 +63,12 @@ def main(args):
     print(f"Combined {n_chains} chains x {n_draws} draws at D={D}")
 
     flat = posterior.reshape(-1, D, D)
-    _, rho = convergent_draws(flat)
-    keep = screen_draws(rho, n_chains, getattr(args, "max_spectral_radius", None))
-    if not keep.any():
-        raise RuntimeError(f"Every draw has spectral radius >= {args.max_spectral_radius}.")
+    rho = draw_spectral_radius(flat)
+    report_spectral_radius(rho, n_chains)
 
-    diagnostics = posterior_diagnostics(posterior, rho, keep, seed=args.seed)
+    diagnostics = posterior_diagnostics(posterior, rho, seed=args.seed)
     diagnostics["config"] = {"chain_dirs": list(args.chain_dirs),
-                             "epsilon": args.epsilon,
-                             "max_spectral_radius": getattr(args, "max_spectral_radius", None)}
+                             "epsilon": args.epsilon}
     with open(os.path.join(args.output_dir, "diagnostics.json"), "w") as fh:
         json.dump(diagnostics, fh, indent=2)
 
@@ -88,12 +84,11 @@ def main(args):
         warnings.warn("Chains did not converge cleanly: " + "; ".join(issues)
                       + ". See diagnostics.json.", RuntimeWarning)
 
-    kept = flat[keep]
     frame = lambda m: pd.DataFrame(m, columns=colnames, index=colnames)  # noqa: E731
-    frame(kept.mean(axis=0)).to_csv(f"{args.output_dir}/G.csv", index=True)
-    frame((np.abs(kept) > args.epsilon).mean(axis=0)).to_csv(
+    frame(flat.mean(axis=0)).to_csv(f"{args.output_dir}/G.csv", index=True)
+    frame((np.abs(flat) > args.epsilon).mean(axis=0)).to_csv(
         f"{args.output_dir}/pip.csv", index=True)
-    frame(compute_lfsr(kept)).to_csv(f"{args.output_dir}/lfsr.csv", index=True)
+    frame(compute_lfsr(flat)).to_csv(f"{args.output_dir}/lfsr.csv", index=True)
 
     print(
         "Diagnostics: "
@@ -118,8 +113,6 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon", type=float, default=0.05,
                         help="PIP threshold: edges with |G| > epsilon are "
                              "counted as active. Default = 0.05.")
-    parser.add_argument("--max_spectral_radius", type=float, default=None,
-                        help="Exclude draws with rho(G) at or above this. Default: keep all.")
     parser.add_argument("--seed", type=int, default=42,
                         help="Seed for the ESS subsample. Default = 42.")
     main(parser.parse_args())

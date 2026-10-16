@@ -1,8 +1,9 @@
 #!/bin/bash
 # Appendix H / Table 6: the Figure 2 sweep again with the soft acyclicity
 # constraint, a Gaussian prior N(0, 0.5^2) on the spectral radius of G
-# computed by power iteration, as on main. Everything else is the default, so
-# each run differs from its Figure 2 counterpart only by the constraint.
+# computed by power iteration (ibcd.py --rho_penalty gaussian). Everything
+# else is the default, so each run differs from its Figure 2 counterpart only
+# by the constraint.
 #
 # 4 dims x 2 graph families x 10 seeds = 80 array elements, same mapping and
 # data as run_ibcd_dims_sweep.sh.
@@ -58,7 +59,6 @@ python "$IBCD" \
     --output_dir "$OUT_DIR" \
     --seed "$SEED" \
     --rho_penalty gaussian \
-    --rho_estimator power \
     --rho_sigma 0.5 \
     --save_diagnostics
 
