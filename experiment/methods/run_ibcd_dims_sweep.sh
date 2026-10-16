@@ -8,6 +8,12 @@
 # implicit so one change of default moves every sweep together; each run
 # records what it actually used in diagnostics.json.
 #
+# PIPs are computed at --epsilon 0.075, the threshold the simulation analyses
+# use (Figure 4, Table 5), so pip.csv serves them directly; the real-data
+# runs keep the default 0.05. After each run, expected_metrics.py writes
+# E-F1 / E-SHD over the draws to expected_metrics.json (Table 9), so
+# G_draws.npy need not be copied back.
+#
 # Generate the data first. --write_iv false if not running a method that
 # consumes the IVs directly.
 #
@@ -33,6 +39,7 @@ source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate ibcd
 
 IBCD="$HOME/projects/IBCD/src/ibcd.py"
+EXPECTED="$HOME/projects/IBCD/experiment/simulation/expected_metrics.py"
 DATA_ROOT="$PROJECT/IBCD_results/sim_data"
 OUT_ROOT="$PROJECT/IBCD_results/ibcd_runs"
 
@@ -69,6 +76,14 @@ python "$IBCD" \
     --prior "$GRAPH" \
     --output_dir "$OUT_DIR" \
     --seed "$SEED" \
+    --epsilon 0.075 \
     --save_diagnostics
+status=$?
 
-echo "task ${LSB_JOBINDEX} finished with status $?"
+# E-F1 / E-SHD over the draws (Table 9), so G_draws.npy need not be copied
+if (( status == 0 )); then
+    python "$EXPECTED" --run_dir "$OUT_DIR" \
+        --g_true "$DATA_ROOT/${D}d/${N_INT}/${GRAPH}/${SEED}/G_matrix.csv" --eps 0.075
+fi
+
+echo "task ${LSB_JOBINDEX} finished with status $status"

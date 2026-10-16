@@ -856,6 +856,53 @@ def test_combine_chains_keeps_every_draw():
         assert np.allclose(out["G"].values, allv.mean(axis=0), atol=1e-6)
 
 
+# --------------------------------------------------------------------------
+# experiment/simulation/expected_metrics.py (Table 9)
+# --------------------------------------------------------------------------
+
+def _expected_metrics_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "expected_metrics", REPO / "experiment" / "simulation" / "expected_metrics.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_expected_metrics_averages_f1_and_shd_over_draws():
+    em = _expected_metrics_module()
+    G_true = np.zeros((4, 4)); G_true[0, 1] = 0.3; G_true[1, 2] = -0.2; G_true[2, 3] = 0.05   # below eps: not an edge, as in metrics.R
+    exact = G_true.copy()                                     # 0.05 stays below eps in the draw too
+    miss_one = exact.copy(); miss_one[1, 2] = 0.05            # below eps: a missed edge
+    extra = exact.copy(); extra[3, 0] = 0.5                   # a false positive
+    draws = np.stack([exact, miss_one, extra])[None]          # (chains, draws, D, D)
+    out = em.expected_metrics(draws, G_true, eps=0.075, chunk=2)
+    assert out["n_draws"] == 3
+    assert np.isclose(out["E_SHD"], (0 + 1 + 1) / 3)
+    assert np.isclose(out["E_F1"], (1.0 + 2 / 3 + 4 / 5) / 3)
+
+
+def test_expected_metrics_script_writes_its_json():
+    import subprocess
+    rng = np.random.default_rng(0)
+    G_true = np.triu(rng.normal(0, 0.3, (5, 5)) * (rng.random((5, 5)) < 0.5), 1)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        np.save(tmp / "G_draws.npy", (G_true + rng.normal(0, 0.05, (2, 7, 5, 5))).astype(np.float32))
+        pd.DataFrame(G_true, columns=[f"V{i + 1}" for i in range(5)]).to_csv(tmp / "G_true.csv", index=False)
+        res = subprocess.run([sys.executable, str(REPO / "experiment" / "simulation" / "expected_metrics.py"),
+                              "--run_dir", str(tmp), "--g_true", str(tmp / "G_true.csv")],
+                             capture_output=True, text=True)
+        assert res.returncode == 0, res.stderr
+        out = json.load(open(tmp / "expected_metrics.json"))
+    assert out["n_draws"] == 14 and out["eps"] == 0.075
+    assert 0.0 <= out["E_F1"] <= 1.0 and out["E_SHD"] >= 0.0
+
+
+# --------------------------------------------------------------------------
+# End to end (slow)
+# --------------------------------------------------------------------------
+
 def _run_pipeline(prior="sf", save_diagnostics=True, oracle=False, **overrides):
     """Run the real pipeline on a small subset of the shipped example data.
 
