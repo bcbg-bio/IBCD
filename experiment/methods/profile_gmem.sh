@@ -13,11 +13,14 @@
 #   tasks 7-8    simulated D = 500 SF, seed 42      num_samples 100, 200
 #   tasks 9-10   real essential screen, SF, train   num_samples 100, 200
 #
-# 20 warmup iterations each; other settings are the defaults (3 chains). The
-# stored draws do not depend on the prior, so SF stands in for ER too. Writes
-# gmem.json to each output directory and prints the extrapolation. Expect
-# minutes at D <= 250, under an hour at D = 500 and up to about 2 hours for
-# the real data.
+# 20 warmup iterations and --max_tree_depth 6, otherwise the defaults (3
+# chains). 20 warmup iterations leave the step size unadapted, so at the
+# default depth 12 every iteration would run to the cap; depth 6 keeps the
+# profile short. The stored draws, which dominate the peak, do not depend on
+# the depth; NUTS keeps about one latent-sized checkpoint per tree level, so
+# depth 12 adds about 6 x 3 x 3 D^2 x 4 bytes (about 80 MB at D = 521). The
+# stored draws do not depend on the prior either, so SF stands in for ER.
+# Writes gmem.json to each output directory and prints the extrapolation.
 #
 #   mkdir -p logs && bsub < profile_gmem.sh
 
@@ -55,7 +58,8 @@ import json, runpy, sys
 src, data, out, ns = sys.argv[1:5]
 sys.path.insert(0, src)
 sys.argv = [f"{src}/ibcd.py", "--data", data, "--prior", "sf", "--output_dir", out,
-            "--num_warmup", "20", "--num_samples", ns, "--save_diagnostics"]
+            "--num_warmup", "20", "--num_samples", ns, "--max_tree_depth", "6",
+            "--save_diagnostics"]
 runpy.run_path(f"{src}/ibcd.py", run_name="__main__")
 import jax
 st = jax.devices()[0].memory_stats()
