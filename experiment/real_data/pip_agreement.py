@@ -28,6 +28,7 @@ Missing runs are skipped with a note.
 
 import argparse
 import itertools
+import json
 import os
 
 import numpy as np
@@ -44,6 +45,12 @@ FOLDS = tuple(f"train_fold{k}" for k in range(1, 6))
 
 
 def n_draws(run_dir):
+    """Posterior draws behind the run's PIPs, from diagnostics.json or else G_draws.npy."""
+    diag = os.path.join(run_dir, "diagnostics.json")
+    if os.path.exists(diag):
+        with open(diag) as fh:
+            d = json.load(fh)
+        return int(d["n_draws_total"] - d.get("excluded", {}).get("n", 0))
     draws = np.load(os.path.join(run_dir, "G_draws.npy"), mmap_mode="r")
     return int(np.prod(draws.shape[:-2]))
 
