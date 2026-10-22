@@ -1,0 +1,8 @@
+.DS_Store
+open_source/results/
+open_source/data/Y_matrix/
+open_source/mlruns/
+open_source/poetry-installer-error-*.log
+open_source/generate/Y_matrix.csv
+open_source/generate/Y_matrix_std/
+open_source/comparison/*.csv
