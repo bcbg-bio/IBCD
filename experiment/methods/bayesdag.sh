@@ -1,4 +1,10 @@
 #!/bin/bash
+# BayesDAG baseline (Annadani et al., 2023). The BayesDAG code is not on main:
+# it is vendored on the `bayesdag` branch at experiment/methods/Project-BayesDAG/
+# (microsoft/Project-BayesDAG with the changes these runs need, including
+# open_source/generate/generate_from_csv.py). Check out that branch, install
+# it with Poetry as its README describes, and run this script from
+# experiment/methods/Project-BayesDAG/open_source.
 
 TOP="ex"   # top directory
 levels=(5 15 25 50 75 100)

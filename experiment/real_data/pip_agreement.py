@@ -6,8 +6,8 @@ of run_ibcd_real.sh:
              pairs overlaid, ER and SF side by side, one figure per screen.
   Figure 8   full essential screen against full GWPS screen, ER and SF.
   Table 2    IBCD's row: F1 and SHD between the fold pairs' posterior means
-             thresholded at 0.075 (as experiment/methods/cv_comparison.R on
-             main computes them), and the pooled fold-pair PIP correlation.
+             thresholded at 0.075 (as experiment/methods/cv_comparison.R
+             computes them), and the pooled fold-pair PIP correlation.
 
 Only off-diagonal entries are used. Pearson r is computed on PIP. The plots
 use log axes; a PIP of 0 cannot go on one, so there zeros are drawn at half
