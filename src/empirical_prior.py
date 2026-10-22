@@ -1,12 +1,8 @@
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning, module="cvxpy")
-
 import pandas as pd
 import numpy as np
 import jax.numpy as jnp
 from jax.scipy.stats import norm
 import jax
-import cvxpy as cp
 from tqdm import tqdm
 
 
@@ -30,7 +26,42 @@ def load_R_and_SE_hat(r_hat_file, se_hat_file):
     return w, se
 
 
-def empirical_bayes_em(w, se_hat, K=50, sigma_min=0.01, sigma_max=1.0, alpha_er=2, tol=1e-6, safety_limit=5_000_000):
+def _project_to_budget(x, budget, max_iter=200, tol=1e-14):
+    """Euclidean projection of x onto {y : sum(y) == budget, 0 <= y <= 1}.
+
+    Both prior paths minimise a squared distance to xi subject to the box and
+    a single constraint fixing the total slab mass. That is exactly this
+    projection, whose solution is clip(x + c, 0, 1) for the unique offset c
+    matching the budget. c is found by bisection; the bracket below is chosen
+    so the clipped sum runs from 0 to len(x) across it.
+
+    Args:
+        x (np.ndarray): Point to project.
+        budget (float): Required sum of the result.
+
+    Returns:
+        np.ndarray: The projection of x.
+    """
+    x = np.asarray(x, dtype=float)
+    n = x.size
+    if n == 0:
+        return x.copy()
+
+    budget = float(np.clip(budget, 0.0, n))
+    lo = -float(x.max())       # sum(clip(x + lo, 0, 1)) == 0
+    hi = 1.0 - float(x.min())  # sum(clip(x + hi, 0, 1)) == n
+    for _ in range(max_iter):
+        c = 0.5 * (lo + hi)
+        if np.clip(x + c, 0.0, 1.0).sum() < budget:
+            lo = c
+        else:
+            hi = c
+        if hi - lo < tol:
+            break
+    return np.clip(x + 0.5 * (lo + hi), 0.0, 1.0)
+
+
+def empirical_bayes_em(w, se_hat, K=50, sigma0=0.001, sigma_min=0.01, sigma_max=1.0, alpha_er=2, tol=1e-6, safety_limit=5_000_000):
     """
     Run the EM algorithm for Empirical Bayes estimation of spike-and-slab mixture.
 
@@ -38,25 +69,29 @@ def empirical_bayes_em(w, se_hat, K=50, sigma_min=0.01, sigma_max=1.0, alpha_er=
         w (jnp.ndarray): Off-diagonal entries of R_hat (observations).
         se_hat (jnp.ndarray): Standard error estimates for each entry.
         K (int): Number of slab components.
+        sigma0 (float): Standard deviation of the spike component.
         sigma_min (float): Minimum variance for slab components.
         sigma_max (float): Maximum variance for slab components.
-        alpha (float): Penalty hyperparameter (default: 2).
+            sigma_k holds the corresponding standard deviations.
+        alpha_er (float): Penalty hyperparameter (default: 2).
         tol (float): Convergence threshold for stopping criteria.
+        safety_limit (int): Maximum number of EM iterations before stopping.
 
     Returns:
         pi_0 (float): Estimated proportion of the spike component.
         pi_k (jnp.ndarray): Estimated proportions of the slab components.
+        sigma_k (jnp.ndarray): Standard deviations of the slab components.
     """
     N = len(w)
-    sigma_k = jnp.linspace(jnp.sqrt(sigma_min), sigma_max, K)**2
+    sigma_k = jnp.linspace(jnp.sqrt(sigma_min), jnp.sqrt(sigma_max), K)
     pi_0 = jnp.array(0.5)
     pi_k = jnp.full(K, (1 - pi_0) / K)
 
     @jax.jit
     def em_step(params):
         pi_0, pi_k = params
-        f_0 = norm.pdf(w, loc=0, scale=jnp.sqrt(0.001) + se_hat)
-        f_k = norm.pdf(w[:, None], loc=0, scale=jnp.sqrt(sigma_k)[None, :] + se_hat[:, None])
+        f_0 = norm.pdf(w, loc=0, scale=jnp.sqrt(sigma0**2 + se_hat**2))
+        f_k = norm.pdf(w[:, None], loc=0, scale=jnp.sqrt(sigma_k[None, :]**2 + se_hat[:, None]**2))
         numerator_0 = pi_0 * f_0
         numerator_k = pi_k * f_k
         denominator = numerator_0 + numerator_k.sum(axis=1)
@@ -96,145 +131,157 @@ def empirical_bayes_em(w, se_hat, K=50, sigma_min=0.01, sigma_max=1.0, alpha_er=
 
     return pi_0, pi_k, sigma_k
 
-def solve_spike_slab_diagonal_spike(
-    xi,
-    pi0,
-    alpha_data=1.0,
-    beta_global=1.0
-):
+def em_slab_scale(pi_k, sigma_k):
+    """Root-mean-square standard deviation of the EM's fitted slab.
+
+    sqrt(sum_k pi_k sigma_k^2 / sum_k pi_k) over the slab components of
+    empirical_bayes_em, excluding the spike. It is fitted to R_hat, the total
+    effects, and used as the scale of the direct effects G; see NOTES.md,
+    2026-10-02 and 2026-10-06, for how the two compare. It is at least the
+    smallest slab SD on the EM's grid.
+    """
+    pi_k = np.asarray(pi_k, dtype=float); sigma_k = np.asarray(sigma_k, dtype=float)
+    return float(np.sqrt((pi_k * sigma_k ** 2).sum() / pi_k.sum()))
+
+
+def solve_spike_slab_diagonal_spike(xi, pi0):
     """
     Solve for edge-specific spike and slab weights under constraints.
 
     Args:
         xi (np.ndarray): Empirical Bayes statistic matrix (e.g., lfsr or xi scores).
         pi0 (float): Global spike proportion.
-        alpha_data (float): Weight on data residual term.
 
     Returns:
         pi0_ij (np.ndarray): Edge-specific spike weight matrix.
         pi_k_ij (np.ndarray): Edge-specific slab weight matrix.
-        val (float): Optimization objective value.
     """
 
     D = xi.shape[0]
 
-    pi0_var = cp.Variable((D,D), nonneg=True)
-    pik_var = cp.Variable((D,D), nonneg=True)
-
-
-    constraints = []
-
     offdiag_mask = np.ones((D, D), dtype=bool)
     np.fill_diagonal(offdiag_mask, False)
 
-    constraints.append(pi0_var[offdiag_mask] + pik_var[offdiag_mask] == 1.0)
-    constraints.append(cp.diag(pi0_var) == 1.0)
-    constraints.append(cp.diag(pik_var) == 0.0)
+    # Scale xi so that its total over the off-diagonal equals the slab budget
+    # implied by the sparsity constraint, S = (1 - pi0) * (D^2 - D). The data
+    # term then agrees with the constraint, so the projection below returns
+    # xi_norm itself wherever the [0, 1] box does not bind.
+    slab_budget = float(1.0 - pi0) * (D**2 - D)
+    xi_offdiag_sum = float(xi[offdiag_mask].sum())
+    if xi_offdiag_sum > 1e-12:
+        xi_norm = xi * (slab_budget / xi_offdiag_sum)
+    else:
+        xi_norm = np.full((D, D), slab_budget / (D**2 - D))
 
-    max_xi = xi.max()
-    if max_xi < 1e-12:
-        max_xi = 1e-12
-    xi_norm = xi / max_xi
+    # pi0_ij + pi_k_ij == 1 off the diagonal, and the diagonal is all spike,
+    # so only the off-diagonal slab weights are free.
+    pik_sol = np.zeros((D, D))
+    pi0_sol = np.ones((D, D))
+    pik_sol[offdiag_mask] = _project_to_budget(xi_norm[offdiag_mask], slab_budget)
+    pi0_sol[offdiag_mask] = 1.0 - pik_sol[offdiag_mask]
 
+    return pi0_sol, pik_sol
 
-    data_resid = cp.sum_squares(
-        cp.multiply(offdiag_mask, pik_var - xi_norm)
-    ) + cp.sum_squares(
-        cp.multiply(offdiag_mask, pi0_var - (1 - xi_norm))
-    )
+def _cap_and_redistribute(budget, cap, n_iter=100):
+    """Clip a budget vector at `cap`, spreading the excess over the rest.
 
-    # C) Global prior penalty: 
-    #    We only want the sum over off-diagonal pi0_ij to be ~ pi0 * (D^2 - D).
-    sum_pi0_offdiag = cp.sum(pi0_var) - cp.sum(cp.diag(pi0_var))
-    #   i.e. pi0*(D^2 - D) is the target
-    #global_penalty = cp.square(
-    #    sum_pi0_offdiag - pi0*(D**2 - D)
-    #)
-    constraints.append(
-        sum_pi0_offdiag == pi0*(D**2 - D)
-    )
-    # Weighted objective
-    objective = alpha_data*data_resid # + beta_global*global_penalty
-
-    # Solve
-    prob = cp.Problem(cp.Minimize(objective), constraints)
-    val = prob.solve()
-
-    # Extract numeric solutions
-    pi0_sol = pi0_var.value
-    pik_sol = pik_var.value
-
-    return pi0_sol, pik_sol, val
-
-def scale_free_degree(R):
-    """
-    Given a matrix R (numpy array), solve for P using a degree-matching
-    optimization, then return pi0 = 1 - P.
+    Clipping alone would quietly lower the total, which is the quantity the
+    EM anchors. Redistributing proportionally preserves it, and is iterated
+    because moving mass onto the uncapped rows can push some of them over.
 
     Args:
-        R (np.ndarray): Input square matrix of shape (D, D).
+        budget (np.ndarray): Per-row slab budgets.
+        cap (float): Largest budget any single row may hold.
+        n_iter (int): Maximum redistribution passes.
 
     Returns:
-        pi0 (np.ndarray): Matrix of shape (D, D), with pi0 = 1 - P.
+        np.ndarray: Budgets bounded by cap, with the total preserved where
+        the cap leaves room for it.
+    """
+    b = np.asarray(budget, dtype=float).copy()
+    for _ in range(n_iter):
+        over = b > cap
+        if not over.any():
+            break
+        excess = float((b[over] - cap).sum())
+        b[over] = cap
+        free = ~over
+        free_mass = float(b[free].sum())
+        if not free.any() or free_mass <= 0:
+            break
+        b[free] += excess * b[free] / free_mass
+    return np.minimum(b, cap)
+
+
+def scale_free_degree(R, pi0_global=None, pi0_floor=0.05):
+    """Per-node spike proportions from the out-strengths of R_hat.
+
+    Let A = |R_hat|^2 with a zero diagonal and theta_i = sum_j A_ij the
+    out-strength of node i. Equation 13 matches the row sums of an edge
+    probability matrix P to theta, which is the Chung-Lu expected-degree
+    condition and only carries a sparsity level if theta is expressed as a
+    degree. It is not: theta is in units of squared effect size, so the
+    overall level it implies is arbitrary.
+
+    Normalising by m = max(theta.max(), phi.max()), the published method,
+    forces the largest node to a budget of D - 1, a completely unshrunk row.
+    Because it is a pure ratio, the implied mean budget per row depends on how
+    skewed theta is rather than on how dense the graph is, and it is invariant
+    to R_hat -> c R_hat.
+
+    With `pi0_global` from the EM of equation 12 the level comes from the
+    data instead: the total slab budget is the one equation 18 gives the ER
+    prior, and theta only decides how it is shared out across rows. The EM is
+    fitted to the total effects, so this level tracks the density of R_hat,
+    not of G. `pi0_floor` bounds any single row's share so no row is ever
+    left entirely unshrunk. See NOTES.md, 2026-10-05 and 2026-10-06, for how
+    the two levels compare in simulation and on real data.
+
+    Args:
+        R (np.ndarray): D x D matrix of estimated total causal effects.
+        pi0_global (float): Global spike proportion from `empirical_bayes_em`.
+            When None the published max-normalisation is used
+            (ibcd.py --sf_anchor none).
+        pi0_floor (float): Smallest per-node spike proportion, so each row
+            keeps at least this much shrinkage.
+
+    Returns:
+        np.ndarray: Length-D vector of per-node spike proportions.
     """
     D = R.shape[0]
 
-    # 1. Compute theta and phi
     A = np.abs(R)**2
     np.fill_diagonal(A, 0)
-    theta_raw = A.sum(axis=1)
-    phi_raw   = A.sum(axis=0)
+    theta = A.sum(axis=1)
 
-    scale = (D-1) / max(theta_raw.max(), phi_raw.max())
-    theta = theta_raw * scale
-    phi   = phi_raw * scale
+    if pi0_global is None:
+        phi = A.sum(axis=0)
+        m = max(theta.max(), phi.max())
+        if m <= 0:
+            return np.ones(D)
+        return 1.0 - theta / m
 
-    # 2. Build constraint matrices A_out and A_in
-    A_out = np.zeros((D, D*D))
-    A_in = np.zeros((D, D*D))
-    for i in range(D):
-        for j in range(D):
-            if i != j:
-                idx = i * D + j
-                A_out[i, idx] = 1
-                A_in[j, idx] = 1
+    total = float(theta.sum())
+    if total <= 0 or D < 2:
+        return np.ones(D)
 
-    # Remove diagonal entries
-    keep = np.ones(D*D, dtype=bool)
-    for i in range(D):
-        keep[i * D + i] = False
-    A_out = A_out[:, keep]
-    A_in = A_in[:, keep]
+    # Total slab mass from equation 18, shared out in proportion to theta.
+    budget = (1.0 - float(pi0_global)) * (D * D - D) * (theta / total)
+    budget = _cap_and_redistribute(budget, (1.0 - float(pi0_floor)) * (D - 1))
+    return np.clip(1.0 - budget / (D - 1), 0.0, 1.0)
 
-    A_full = np.vstack([A_out, A_in])  # shape (2D, D^2 - D)
-    b_full = np.concatenate([theta, phi])
-    Nvar = A_full.shape[1]
 
-    # 3. Solve quadratic program
-    x = cp.Variable(Nvar)
-    objective = cp.Minimize(cp.sum_squares(A_full @ x - b_full))
-    constraints = [x >= 0, x <= 1]
-    prob = cp.Problem(objective, constraints)
-    prob.solve(solver=cp.ECOS)
+def solve_edge_weights_rowwise(xi, pi0_i):
+    """Solve for edge-specific spike and slab weights, one row at a time.
 
-    P_flat = x.value
-    if P_flat is None:
-        raise RuntimeError("Solver failed: status %s" % prob.status)
+    Args:
+        xi (np.ndarray): Symmetric D x D matrix of interaction strengths.
+        pi0_i (np.ndarray): Length-D vector of per-node spike proportions.
 
-    # 4. Reconstruct P with zero diagonal
-    P = np.zeros((D, D))
-    k = 0
-    for i in range(D):
-        for j in range(D):
-            if i != j:
-                P[i, j] = P_flat[k]
-                k += 1
-
-    # 5. Return pi0
-    pi0 = 1 - P
-    return pi0
-
-def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, symmetric=False):
+    Returns:
+        pi0_ij (np.ndarray): Edge-specific spike weight matrix.
+        pi_k_ij (np.ndarray): Edge-specific slab weight matrix.
+    """
     D = xi.shape[0]
     pi0_ij  = np.zeros((D, D))
     pi_k_ij = np.zeros((D, D))
@@ -246,25 +293,21 @@ def solve_edge_weights_rowwise(xi, pi0_i, alpha_sf=1.0, solver=cp.ECOS, symmetri
         if n == 0:
             continue
 
+        # Scale this row of xi so its total equals the row's slab budget,
+        # d_i = (1 - pi0_i) * n, which is what the sparsity constraint fixes.
         row = xi[i, idx]
-        m = row.max() if row.max() > 0 else 1.0
-        xnorm = row / m
+        row_budget = float(1.0 - pi0_i[i]) * n
+        row_sum = float(row.sum())
+        if row_sum > 1e-12:
+            xnorm = row * (row_budget / row_sum)
+        else:
+            xnorm = np.full(n, row_budget / n)
 
-        p0 = cp.Variable(n, nonneg=True)
-        pk = cp.Variable(n, nonneg=True)
-        cons = [p0 + pk == 1, cp.sum(p0) == pi0_i[i] * n]
-        obj = cp.sum_squares(pk - xnorm) + cp.sum_squares(p0 - (1 - xnorm))
+        pk = _project_to_budget(xnorm, row_budget)
+        p0 = 1.0 - pk
 
-        prob = cp.Problem(cp.Minimize(alpha_sf * obj), cons)
-        prob.solve(solver=solver, verbose=False)
-
-        pi0_ij[i, idx] = p0.value
-        pi_k_ij[i, idx] = pk.value
-
-        if symmetric:
-            # optional: mirror to make undirected
-            pi0_ij[idx, i] = p0.value
-            pi_k_ij[idx, i] = pk.value
+        pi0_ij[i, idx] = p0
+        pi_k_ij[i, idx] = pk
 
     # diagonal always spike
     np.fill_diagonal(pi0_ij, 1.0)

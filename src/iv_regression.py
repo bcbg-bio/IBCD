@@ -122,3 +122,43 @@ def run_all_IV(df, out_dir="."):
     pd.DataFrame(V, columns=genes).to_csv(f"{out_dir}/V.csv", index=False)
 
 
+
+
+def compute_S_hat(df, R_hat):
+    """
+    The full D^2 x D^2 covariance of vec(R_hat), equation 9 / Appendix A.1:
+
+        S_ijkl = Cov(yhat_i, yhat_k) Cov(eps_ij, eps_kl) / (n Var(yhat_i) Var(yhat_k)),
+
+    for the multivariate-normal ablation (Table 7), entries ordered as
+    R_hat.reshape(-1), i.e. (i, j) row-major.
+
+    yhat_i is the first-stage fit of y_i on its instrument over all n samples:
+    the mean of y_i in the cells intervened on i, zero elsewhere (the data are
+    centred on the controls, as the 2SLS here assumes). eps_ij = y_j - R_hat_ij
+    y_i is taken over the control cells, the samples every i shares, where it
+    is pure noise.
+
+    Memory grows as D^4 (D = 50 is 50 MB), so this is for small D only.
+    """
+    feature_cols = [c for c in df.columns if c != "target"]
+    Y = df[feature_cols].to_numpy(dtype=np.float64)
+    targets = df["target"].to_numpy()
+    n, D = Y.shape
+    if D > 100:
+        raise ValueError(f"compute_S_hat is O(D^4) in memory; D = {D} is too large")
+
+    yhat = np.zeros((n, D))
+    for i, gene in enumerate(feature_cols):
+        cells = targets == gene
+        yhat[cells, i] = Y[cells, i].mean()
+    C_y = np.cov(yhat, rowvar=False)
+    var_y = np.diag(C_y)
+    A = C_y / (n * np.outer(var_y, var_y))
+
+    Y_c = Y[targets == "control"]
+    eps = Y_c[:, None, :] - R_hat[None, :, :] * Y_c[:, :, None]    # (n_c, i, j)
+    eps = eps.reshape(Y_c.shape[0], D * D)
+    C_eps = np.cov(eps, rowvar=False).reshape(D, D, D, D)          # (i, j, k, l)
+    S = C_eps * A[:, None, :, None]
+    return S.reshape(D * D, D * D)
